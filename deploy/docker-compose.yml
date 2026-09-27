@@ -1,0 +1,41 @@
+# cloudmorrow.com's side of "Reaching your cloud", on one VPS.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# The relay runs with host networking: it must see visitors' real
+# addresses (rate limits) and answer DNS on the machine's public
+# addresses. Headscale sits on loopback behind it; only its STUN port is
+# public, everything else reaches it through the relay on 443.
+
+services:
+  relay:
+    build: ..
+    image: cloudmorrow-relay
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./relay.toml:/etc/cloudmorrow-relay/relay.toml:ro
+      - ./secrets/headscale-api-key:/etc/cloudmorrow-relay/headscale-api-key:ro
+      - relay-state:/var/lib/cloudmorrow-relay
+      - ./tls:/etc/cloudmorrow-relay/tls:ro
+      - headscale-dns:/var/lib/headscale-dns
+    depends_on:
+      - headscale
+
+  headscale:
+    image: docker.io/headscale/headscale:0.29.4
+    restart: unless-stopped
+    command: serve
+    ports:
+      - "127.0.0.1:8080:8080"   # for the relay only; never publish it
+      - "3478:3478/udp"         # STUN, for the embedded DERP server
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - headscale-data:/var/lib/headscale
+      - headscale-dns:/var/lib/headscale-dns
+
+volumes:
+  relay-state:
+  headscale-data:
+  headscale-dns:

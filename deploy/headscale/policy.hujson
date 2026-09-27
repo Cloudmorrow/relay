@@ -1,0 +1,13 @@
+// Each cloud is one Headscale user. Its devices may reach each other, and
+// nothing else: autogroup:self is "devices of the same user". Without this
+// file Headscale allows everything, and every cloud's devices could reach
+// every other cloud's box.
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self:*"]
+    }
+  ]
+}
