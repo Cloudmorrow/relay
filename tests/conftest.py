@@ -96,9 +96,24 @@ def limits():
 
 
 @pytest.fixture
-async def svc(tmp_path, ca, fake_hs, limits):
+def extra_config():
+    """Tests add or replace config sections by asking for this."""
+    return {}
+
+
+def _merge(base: dict, extra: dict) -> dict:
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+@pytest.fixture
+async def svc(tmp_path, ca, fake_hs, limits, extra_config):
     webroot = tmp_path / "acme"
-    cfg = from_dict({
+    cfg = from_dict(_merge({
         "zone": ZONE,
         "relay_host": RELAY,
         "login_host": MESH,
@@ -121,7 +136,7 @@ async def svc(tmp_path, ca, fake_hs, limits):
             ],
         },
         "limits": limits,
-    })
+    }, extra_config))
     service = Service(cfg)
     await service.start()
     service.fake = fake_hs

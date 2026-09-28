@@ -1,0 +1,10 @@
+# Placeholder for cloudmorrow.com until cloudmorrow-web moves in.
+#
+# The relay hands this Caddy the visitors' connections untouched, so Caddy
+# gets its own certificate: Let's Encrypt's HTTP-01 request comes in
+# through Cloudflare's proxy on port 80, and the relay routes it here by
+# Host. (Cloudflare's SSL mode for cloudmorrow.com: "Full (strict)".)
+
+cloudmorrow.com, www.cloudmorrow.com {
+	respond "Cloudmorrow. Soon." 200
+}

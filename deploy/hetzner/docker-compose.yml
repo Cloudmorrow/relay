@@ -1,0 +1,52 @@
+# The Hetzner box (178.105.27.139): relay + control API, Headscale with its
+# DERP, and the website, all on one machine. See the README section
+# "Deploying on the Hetzner box". Run from this folder:
+#
+#   docker compose up -d --build
+#
+# Everything that must survive lives under /srv/cloudmorrow-relay.
+
+services:
+  relay:
+    build: ../..
+    image: cloudmorrow-relay
+    restart: unless-stopped
+    # Host networking: the relay owns 80 and 443 and sees visitors' real
+    # addresses; it reaches Headscale and the website on loopback.
+    network_mode: host
+    env_file: /srv/cloudmorrow-relay/secrets.env      # CLOUDFLARE_API_TOKEN=…
+    volumes:
+      - ./relay.toml:/etc/cloudmorrow-relay/relay.toml:ro
+      - /srv/cloudmorrow-relay/headscale-api-key:/etc/cloudmorrow-relay/headscale-api-key:ro
+      - /srv/cloudmorrow-relay/state:/var/lib/cloudmorrow-relay
+      - /srv/cloudmorrow-relay/headscale-dns:/var/lib/headscale-dns
+    depends_on:
+      - headscale
+
+  headscale:
+    image: docker.io/headscale/headscale:0.29.4
+    restart: unless-stopped
+    command: serve
+    ports:
+      - "127.0.0.1:18080:8080"   # the relay only; never publish it
+      - "3478:3478/udp"          # STUN for the embedded DERP
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ../headscale/policy.hujson:/etc/headscale/policy.hujson:ro
+      - /srv/cloudmorrow-relay/headscale:/var/lib/headscale
+      - /srv/cloudmorrow-relay/headscale-run:/var/run/headscale
+      - /srv/cloudmorrow-relay/headscale-dns:/var/lib/headscale-dns
+
+  # A placeholder for cloudmorrow-web behind Caddy: the relay passes
+  # cloudmorrow.com through to it (443 → 127.0.0.1:8443, 80 → :8080).
+  # Replace the image and Caddyfile with the real site.
+  website:
+    image: docker.io/library/caddy:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8443:443"
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./website/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /srv/cloudmorrow-relay/website/data:/data
+      - /srv/cloudmorrow-relay/website/config:/config

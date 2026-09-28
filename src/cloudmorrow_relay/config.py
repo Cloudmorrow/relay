@@ -42,6 +42,38 @@ class Nameserver:
 
 
 @dataclass
+class Route:
+    """A name that is not a cloud's but shares the machine: the website,
+    the shop. On 443 it is matched by SNI and passed through untouched,
+    exactly like a cloud's; on 80 by Host. The upstream (a local Caddy, say)
+    does its own TLS.
+    """
+
+    upstream: tuple[str, int]
+    sni: list[str] = field(default_factory=list)
+    host: list[str] = field(default_factory=list)
+    # Send a PROXY protocol v1 line first, so the upstream sees the
+    # visitor's address instead of the relay's (Caddy: proxy_protocol).
+    proxy_protocol: bool = False
+
+
+@dataclass
+class Acme:
+    """Getting the relay's own certificate (relay host + login host) by
+    itself, with lego. Off when `client` is empty: then the files at
+    tls.cert/tls.key are somebody else's business, as before.
+    """
+
+    client: str = ""  # "" or "lego"
+    challenge: str = "dns-cloudflare"  # or "http" (webroot on our port 80)
+    email: str = ""
+    server: str = "https://acme-v02.api.letsencrypt.org/directory"
+    lego: str = "lego"
+    path: Path | None = None  # lego's own storage; default state_dir/lego
+    renew_hours: float = 12.0
+
+
+@dataclass
 class Limits:
     # A name is cheap to claim and a squatter is patient: a handful an hour
     # from one address is plenty for anybody setting up a box.
@@ -112,6 +144,17 @@ class Config:
     records: list[StaticRecord] = field(default_factory=list)
     extra_reserved: list[str] = field(default_factory=list)
     limits: Limits = field(default_factory=Limits)
+    # Where the zone's records live: "builtin" (our own DNS server, the
+    # parent delegates to it) or "cloudflare" (the zone is at Cloudflare
+    # with a wildcard to this machine; we write only what the wildcard
+    # cannot say).
+    dns_backend: str = "builtin"
+    cloudflare_api_url: str = "https://api.cloudflare.com/client/v4"
+    cloudflare_zone: str | None = None  # default: the zone
+    cloudflare_token_env: str = "CLOUDFLARE_API_TOKEN"
+    dns_tag: str = "cloudmorrow-relay"
+    routes: list[Route] = field(default_factory=list)
+    acme: Acme = field(default_factory=Acme)
 
     # --- derived -------------------------------------------------------
 
@@ -146,6 +189,10 @@ class Config:
         for rec in self.records:
             if rec.name not in ("@", ""):
                 own.add(rec.name.split(".")[-1].lower())
+        for route in self.routes:
+            for host in route.sni + route.host:
+                if host.endswith("." + self.zone):
+                    own.add(host[: -len(self.zone) - 1].split(".")[-1])
         return RESERVED_NAMES | {n.lower() for n in own}
 
 
@@ -166,6 +213,30 @@ def _ip(value: str | None, version: int, what: str) -> str | None:
     if addr.version != version:
         raise ConfigError(f"{what} is not an IPv{version} address")
     return str(addr)
+
+
+def _upstream(value: str) -> tuple[str, int]:
+    host, sep, port = str(value).rpartition(":")
+    if not sep or not port.isdigit():
+        raise ConfigError(f"route upstream {value!r} is not host:port")
+    return host.strip("[]"), int(port)
+
+
+def _routes(items: list[dict]) -> list[Route]:
+    routes = []
+    for item in items:
+        unknown = set(item) - {"sni", "host", "upstream", "proxy_protocol"}
+        if unknown:
+            raise ConfigError(f"[[routes]]: unknown {', '.join(sorted(unknown))}")
+        if "upstream" not in item or not (item.get("sni") or item.get("host")):
+            raise ConfigError("[[routes]] needs an upstream and sni or host names")
+        routes.append(Route(
+            upstream=_upstream(item["upstream"]),
+            sni=[_host(h, "route sni") for h in item.get("sni", [])],
+            host=[_host(h, "route host") for h in item.get("host", [])],
+            proxy_protocol=bool(item.get("proxy_protocol", False)),
+        ))
+    return routes
 
 
 def from_dict(data: dict, base: Path | None = None) -> Config:
@@ -229,7 +300,37 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
         records=[StaticRecord(**r) for r in dns.get("records", [])],
         extra_reserved=list(data.get("reserved", [])),
         limits=limits,
+        dns_backend=dns.get("backend", "builtin"),
+        cloudflare_api_url=dns.get("cloudflare_api_url", "https://api.cloudflare.com/client/v4").rstrip("/"),
+        cloudflare_zone=dns.get("cloudflare_zone"),
+        cloudflare_token_env=dns.get("cloudflare_token_env", "CLOUDFLARE_API_TOKEN"),
+        dns_tag=dns.get("tag", "cloudmorrow-relay"),
+        routes=_routes(data.get("routes", [])),
+        acme=Acme(
+            client=tls.get("acme", ""),
+            challenge=tls.get("acme_challenge", "dns-cloudflare"),
+            email=tls.get("acme_email", ""),
+            server=tls.get("acme_server", Acme.server),
+            lego=tls.get("lego", "lego"),
+            path=path(tls.get("lego_path")),
+            renew_hours=float(tls.get("renew_hours", 12.0)),
+        ),
     )
+    if cfg.dns_backend not in ("builtin", "cloudflare"):
+        raise ConfigError('dns.backend is "builtin" or "cloudflare"')
+    if cfg.acme.client not in ("", "lego"):
+        raise ConfigError('tls.acme is "lego" or empty')
+    if cfg.acme.challenge not in ("dns-cloudflare", "http"):
+        raise ConfigError('tls.acme_challenge is "dns-cloudflare" or "http"')
+    if cfg.acme.client:
+        if cfg.acme.path is None:
+            cfg.acme.path = cfg.state_dir / "lego"
+        # The certificate lego gets is copied here, where the relay reads it.
+        if cfg.tls_cert is None:
+            cfg.tls_cert = cfg.state_dir / "tls" / "fullchain.pem"
+            cfg.tls_key = cfg.state_dir / "tls" / "privkey.pem"
+        if cfg.acme.challenge == "http" and cfg.acme_webroot is None:
+            cfg.acme_webroot = cfg.state_dir / "acme"
     for host in (cfg.relay_host, cfg.login_host):
         if not host.endswith("." + zone):
             raise ConfigError(f"{host} is not inside the zone {zone}")

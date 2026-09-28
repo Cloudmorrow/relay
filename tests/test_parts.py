@@ -149,3 +149,14 @@ def test_dev_command(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
     assert proc.returncode == 0
+
+
+def test_hetzner_config_loads():
+    cfg = load(ROOT / "deploy" / "hetzner" / "relay.toml")
+    assert (cfg.zone, cfg.relay_host, cfg.login_host) == ("cloudmorrow.tech", "relay.cloudmorrow.tech", "mesh.cloudmorrow.tech")
+    assert cfg.public_ipv4 == "178.105.27.139"
+    assert cfg.dns_backend == "cloudflare" and cfg.acme.client == "lego"
+    assert cfg.tls_cert == Path("/var/lib/cloudmorrow-relay/tls/fullchain.pem")
+    assert [r.upstream for r in cfg.routes] == [("127.0.0.1", 8443), ("127.0.0.1", 8080)]
+    assert cfg.routes[0].sni == ["cloudmorrow.com", "www.cloudmorrow.com"]
+    assert cfg.login_server == "https://mesh.cloudmorrow.tech"

@@ -5,6 +5,12 @@ RUN useradd --system --uid 10001 --home /var/lib/cloudmorrow-relay relay \
  && mkdir -p /var/lib/cloudmorrow-relay /etc/cloudmorrow-relay \
  && chown relay /var/lib/cloudmorrow-relay
 
+# lego, for the relay's own certificate (acme.py). One static binary.
+ARG LEGO_VERSION=5.5.2
+ARG TARGETARCH=amd64
+ADD https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_${TARGETARCH}.tar.gz /tmp/lego.tar.gz
+RUN tar -xzf /tmp/lego.tar.gz -C /usr/local/bin lego && rm /tmp/lego.tar.gz && lego --version
+
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src

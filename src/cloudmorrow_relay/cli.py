@@ -1,7 +1,8 @@
 """`cloudmorrow-relay serve` and `cloudmorrow-relay dev`.
 
 `serve` runs everything from a TOML config (deploy/relay.example.toml);
-SIGHUP re-reads the certificate files, SIGTERM stops.
+SIGHUP re-reads the certificate files, SIGTERM stops. `install-cert` is
+lego's deploy hook (acme.py), not something to run by hand.
 
 `dev` runs everything on high loopback ports, for trying a box against it
 on one machine: a throwaway CA and certificates, a fake Headscale, and a
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import socket
 import sys
@@ -138,14 +140,26 @@ def main(argv: list[str] | None = None) -> None:
     p_dev = sub.add_parser("dev", help="run everything on loopback with throwaway certificates")
     p_dev.add_argument("--dir", type=Path, help="where to keep the dev state (default: a new temporary folder)")
     p_dev.add_argument("--port-base", type=int, default=18000, help="ports are this plus 443, 80, 53 and 81")
-    for p in (p_serve, p_dev):
+    p_install = sub.add_parser("install-cert", help="lego's deploy hook: copy the new certificate into place")
+    p_install.add_argument("--cert", type=Path, required=True)
+    p_install.add_argument("--key", type=Path, required=True)
+    for p in (p_serve, p_dev, p_install):
         p.add_argument("--log-level", default="info")
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # httpx logs every request it makes to Headscale at INFO; that is noise.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
-        if args.command == "serve":
+        if args.command == "install-cert":
+            from .acme import install
+
+            # lego hands the paths of what it just got in its environment.
+            src_cert = os.environ.get("LEGO_HOOK_CERT_PATH") or os.environ.get("LEGO_CERT_PATH")
+            src_key = os.environ.get("LEGO_HOOK_CERT_KEY_PATH") or os.environ.get("LEGO_CERT_KEY_PATH")
+            if not src_cert or not src_key:
+                sys.exit("install-cert runs as lego's deploy hook (LEGO_HOOK_CERT_PATH is not set)")
+            install(Path(src_cert), Path(src_key), args.cert, args.key)
+        elif args.command == "serve":
             asyncio.run(_serve(load(args.config)))
         else:
             folder = args.dir or Path(tempfile.mkdtemp(prefix="cloudmorrow-relay-dev-"))

@@ -46,6 +46,9 @@ extra_records_path = "/var/lib/headscale-dns/extra-records.json"
 mesh_prefixes = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 
 [dns]
+# "builtin": this server answers for the zone (below). "cloudflare": the zone
+# stays at Cloudflare; see the README, "Choices for a deployment".
+backend = "builtin"
 hostmaster = "hostmaster.cloudmorrow.com"
 ttl = 60
 

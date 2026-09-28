@@ -17,7 +17,8 @@ One process, four parts, one SQLite file:
 | --- | --- | --- |
 | The relay: SNI routing on 443, Host routing on 80, the `cmtunnel/1` tunnels | `router.py`, `sni.py`, `tunnel.py`, `conn.py` | 443, 80 |
 | The control API (`/v1`) and the phone pairing pages, behind the relay's own TLS | `control.py`, `pairing.py` | loopback |
-| The authoritative DNS for the zone | `dnsserver.py` | 53 UDP+TCP |
+| The zone's DNS: our own authoritative server, or records at Cloudflare | `dnsbackend.py`, `dnsserver.py`, `cloudflare.py` | 53 UDP+TCP (builtin only) |
+| The relay's own certificate, by lego (DNS-01 via Cloudflare, or HTTP-01) | `acme.py` | — |
 | Keeping [Headscale](https://github.com/juanfont/headscale) in step: a user per cloud, keys, devices, DNS records | `headscale.py` | — |
 
 plus `store.py` (SQLite), `config.py` (TOML), `limits.py` (rate limits),
@@ -68,11 +69,100 @@ Point the core at it:
 
 `--dir` keeps the state between runs; `--port-base` moves the ports.
 
-Tests: `.venv/bin/pytest` (about 110 tests, half a minute). The live
+Tests: `.venv/bin/pytest` (about 130 tests, under a minute). The live
 Headscale tests download the release binary from GitHub into `.cache/` once
 and are skipped when that fails.
 
-## Running it for real
+## Choices for a deployment
+
+**DNS: `[dns] backend`.** `"builtin"` (the default) makes the relay the
+zone's authoritative server; the parent delegates to it (steps 1–2 below).
+`"cloudflare"` leaves the zone at Cloudflare, with `*.<zone>` and `<zone>`
+pointing at the machine, **DNS only** (the relay must see the visitor's own
+TLS). The relay then writes only what the wildcard cannot say:
+`_acme-challenge.<name>` TXT records for the acme-dns endpoint, and for a
+private cloud an A/AAAA record at `<name>` pointing at its mesh address
+(removed again when it goes public or is deleted). Every record it creates
+carries the comment `cloudmorrow-relay`; it never changes or deletes one
+without it, and a full sync every ten minutes repairs anything a failed
+call left. The token comes from `$CLOUDFLARE_API_TOKEN` (Zone → DNS → Edit,
+Zone → Zone → Read, this zone only), never from the config file.
+
+**Other sites on the same machine: `[[routes]]`.** The relay owns 443 and
+80, so a website on the same box sits behind it: `sni = [...]` names are
+passed through on 443 untouched, exactly like a cloud (the site does its own
+TLS), and `host = [...]` names on 80 by Host. `proxy_protocol = true` sends a
+PROXY v1 line first, for an upstream that wants the visitor's address.
+
+**The relay's own certificate: `[tls] acme = "lego"`.** The relay runs
+[lego](https://go-acme.github.io/lego/) (shipped in the image) at start and
+every twelve hours; lego gets or renews the certificate for the relay host
+and the login host when due, its deploy hook copies it to `tls.cert` /
+`tls.key`, and the relay re-reads it without dropping anything.
+`acme_challenge = "dns-cloudflare"` uses the same Cloudflare token;
+`"http"` answers HTTP-01 from the webroot our port 80 serves. Without
+`acme`, the files are yours to provide (certbot, step 4 below), and SIGHUP
+re-reads them.
+
+## Deploying on the Hetzner box
+
+cloudmorrow.tech at Cloudflare, one machine at 178.105.27.139 running the
+relay, Headscale and the website. The files are in `deploy/hetzner/`:
+`docker-compose.yml`, `relay.toml` (zone `cloudmorrow.tech`, relay
+`relay.cloudmorrow.tech`, login `mesh.cloudmorrow.tech`, Cloudflare DNS,
+lego, the website's routes), `headscale/config.yaml`, and a placeholder
+`website/Caddyfile`. Everything that lasts is under `/srv/cloudmorrow-relay`.
+
+Before: at Cloudflare, `cloudmorrow.tech` and `*.cloudmorrow.tech` A
+178.105.27.139, **DNS only** (grey cloud) — already there. Make an API
+token: *My Profile → API Tokens → Create Token → Edit zone DNS*, zone
+`cloudmorrow.tech`, plus *Zone → Zone → Read*. In the Hetzner firewall open
+22/tcp, 80/tcp, 443/tcp and 3478/udp (53 is not needed with Cloudflare).
+`cloudmorrow.com` at Cloudflare: A 178.105.27.139, proxied, SSL mode *Full
+(strict)*.
+
+On the box, as root (Docker with the compose plugin installed):
+
+```
+mkdir -p /srv/cloudmorrow-relay && cd /srv/cloudmorrow-relay
+git clone https://github.com/Cloudmorrow/relay.git relay
+install -d -o 10001 -m 0750 state                 # the relay runs as uid 10001
+install -d -o 10001 -m 0755 headscale-dns         # the relay writes, Headscale reads
+echo '[]' > headscale-dns/extra-records.json && chown 10001 headscale-dns/extra-records.json
+install -d headscale headscale-run website/data website/config
+( umask 077; echo 'CLOUDFLARE_API_TOKEN=<the token>' > secrets.env )
+touch headscale-api-key && chown 10001 headscale-api-key && chmod 0400 headscale-api-key
+
+cd /srv/cloudmorrow-relay/relay/deploy/hetzner
+docker compose up -d headscale
+docker compose exec headscale headscale apikeys create --expiration 3650d \
+  | tail -n1 > /srv/cloudmorrow-relay/headscale-api-key
+docker compose up -d --build relay website
+docker compose logs -f relay     # wait for "loaded the relay's certificate" (a minute or two)
+```
+
+Check it:
+
+```
+curl -s https://relay.cloudmorrow.tech/v1/clouds/me          # {"detail":"A valid token is required."}
+curl -s https://mesh.cloudmorrow.tech/health                  # Headscale: {"status":"pass"}
+curl -sI https://cloudmorrow.com                              # the website, through Cloudflare
+```
+
+Then clouds use `access_control = "https://relay.cloudmorrow.tech"` (the
+core's server config).
+
+Update: `cd /srv/cloudmorrow-relay/relay && git pull && cd deploy/hetzner &&
+docker compose up -d --build relay`. Back up `/srv/cloudmorrow-relay/state`
+(the database, its `secret`, lego's account) and
+`/srv/cloudmorrow-relay/headscale` (its database and `noise_private.key`);
+`secrets.env` and `headscale-api-key` can be made again. The website service
+is a placeholder: replace its image and `website/Caddyfile` with
+cloudmorrow-web; it must keep serving TLS itself on its 443 (the relay
+passes `cloudmorrow.com` through) and HTTP on 80 (Let's Encrypt's HTTP-01
+arrives there through Cloudflare).
+
+## Running it for real (your own DNS server)
 
 What you need: a small VPS with a public IPv4 (and IPv6 if you have it), the
 domain, and Docker. Everything below uses `cloudmorrow.com`, `203.0.113.10`
@@ -257,6 +347,12 @@ back. Ten tries per address and per waiting phone every ten minutes.
   name, so no CNAME is needed. `update` keeps the latest two values (as
   acme-dns does) with a TTL of 1 s. For Caddy's `acmedns` module:
   `server_url` is `https://<relay_host>/v1/acme-dns`.
+
+**DNS with Cloudflare.** The wildcard answers for public clouds and the
+relay's names. A TXT record at `_acme-challenge.<name>` makes `<name>` an
+empty non-terminal, which a wildcard does not cover (RFC 4592), so while a
+public cloud has challenge values the relay also writes `<name>` A/AAAA →
+its own address. TXT values are written quoted, TTL 60.
 
 **DNS.** `<name>.<zone>` is the relay's addresses when public; the mesh
 address when private and one is known; no address (NOERROR, empty) when

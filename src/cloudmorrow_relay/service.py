@@ -17,9 +17,11 @@ from urllib.parse import urlparse
 
 import uvicorn
 
-from . import control, dnsserver
+from . import control
+from .dnsbackend import BuiltinDns, DnsBackend, DnsError
 from .config import Config
 from .headscale import Headscale, write_extra_records
+from .acme import Renewer
 from .limits import RateLimiter
 from .router import CertStore, Router
 from .store import Store
@@ -47,11 +49,19 @@ async def start_uvicorn(app, sockets: list[socket.socket] | None = None, **kwarg
 
 
 class Service:
-    def __init__(self, cfg: Config, headscale: Headscale | None = None):
+    def __init__(self, cfg: Config, headscale: Headscale | None = None, dns_transport=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
+        self.dns: DnsBackend
+        if cfg.dns_backend == "cloudflare":
+            from .cloudflare import CloudflareDns
+
+            self.dns = CloudflareDns(cfg, self.store, transport=dns_transport)
+        else:
+            self.dns = BuiltinDns(cfg, self.store)
         self.registry = Registry(on_bytes=self.store.add_bytes)
         self.certs = CertStore(cfg.tls_cert, cfg.tls_key)
+        self.renewer = Renewer(cfg, self.certs) if cfg.acme.client == "lego" else None
         lim = cfg.limits
         self.enrol = RateLimiter(lim.enrol_per_hour, 3600)
         self.pair_codes = RateLimiter(lim.pair_codes_per_hour, 3600)
@@ -94,6 +104,17 @@ class Service:
         peer = self.peers.get(client.port) if client and client.host == "127.0.0.1" else None
         return bool(peer and peer[1])
 
+    async def dns_changed(self, names: list[str], strict: bool = False) -> bool:
+        """Tell the DNS backend these names may need other records. A
+        failure is logged and left to the periodic sync, unless `strict`.
+        """
+        try:
+            await self.dns.names_changed(names)
+            return True
+        except DnsError as exc:
+            log.warning("DNS update for %s failed: %s", ", ".join(names), exc)
+            return False
+
     def update_mesh_records(self) -> None:
         """Rewrite Headscale's extra DNS records: each cloud with a mesh
         address has its public name point there, inside the mesh.
@@ -130,13 +151,15 @@ class Service:
         https, http = await self.router.start(cfg.listen, cfg.https_port, cfg.http_port)
         self.https_port = https.sockets[0].getsockname()[1]
         self.http_port = http.sockets[0].getsockname()[1]
-        authority = dnsserver.Authority(cfg, self.store)
-        dns_tcp, self._udp, self.dns_port = await dnsserver.start(authority, cfg.listen, cfg.dns_port)
-        self._servers = [https, http, dns_tcp]
+        await self.dns.start()
+        self.dns_port = getattr(self.dns, "port", 0)
+        self._servers = [https, http]
         self.update_mesh_records()
         self._flush_task = asyncio.create_task(self._flush_loop())
         if self.headscale is not None:
             asyncio.create_task(self._check_headscale())
+        if self.renewer is not None:
+            self.renewer.start()
 
     async def _flush_loop(self) -> None:
         while True:
@@ -162,10 +185,11 @@ class Service:
     async def stop(self) -> None:
         if self._flush_task:
             self._flush_task.cancel()
+        if self.renewer is not None:
+            await self.renewer.stop()
         for server in self._servers:
             server.close()
-        for transport in self._udp:
-            transport.close()
+        await self.dns.stop()
         for tunnel in list(self.registry.tunnels.values()):
             await tunnel.close()
             self.registry.flush(tunnel)

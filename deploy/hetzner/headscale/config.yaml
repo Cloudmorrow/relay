@@ -1,0 +1,89 @@
+# Headscale on the Hetzner box (cloudmorrow.tech), behind the relay.
+# Same as deploy/headscale/config.yaml but for this machine; tested with
+# 0.29.4.
+
+# What the Tailscale apps are told to use: the relay's login host. The
+# relay terminates TLS for it and passes Tailscale's paths to listen_addr.
+server_url: https://mesh.cloudmorrow.tech
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: ""
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+disable_check_updates: true
+# Everything arrives from the relay; do not believe forwarded headers.
+trusted_proxies: []
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    # The embedded DERP relays WireGuard packets for devices that cannot
+    # reach each other directly. Its HTTPS side is /derp on server_url
+    # (through the relay); STUN is UDP 3478, published by compose.
+    enabled: true
+    region_id: 999
+    region_code: cloudmorrow
+    region_name: Cloudmorrow
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    # The box's public address (no IPv6 yet):
+    ipv4: 178.105.27.139
+  # Tailscale's public DERP servers too, as a fallback. Remove to rely on
+  # the embedded one alone.
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 24h
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: info
+  format: text
+
+# Each cloud's devices reach each other and nothing else.
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+dns:
+  magic_dns: true
+  # Must differ from server_url's domain; device names live under it.
+  base_domain: devices.cloudmorrow.internal
+  # Enrolled devices resolve through MagicDNS, so the extra records below
+  # apply to any name (not only under base_domain); everything else goes on
+  # to these resolvers.
+  override_local_dns: true
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 9.9.9.9
+      - 2606:4700:4700::1111
+      - 2620:fe::fe
+  search_domains: []
+  # The relay writes <name>.<zone> → a box's mesh address here, so enrolled
+  # devices reach their box directly.
+  extra_records_path: /var/lib/headscale-dns/extra-records.json
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false

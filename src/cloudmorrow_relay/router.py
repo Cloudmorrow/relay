@@ -14,6 +14,8 @@ On 443 we read the ClientHello's server name and nothing more, then:
                                          everything a browser asks for (the
                                          /register/ page above all) to our
                                          pairing pages
+    a name in [[routes]] sni           → passed through to that upstream (the
+                                         website, the shop on the same machine)
     anything else                      → closed
 
 On 80 the same, by the `Host` header, with no TLS anywhere: a cloud's
@@ -70,6 +72,16 @@ def is_headscale_path(path: str) -> bool:
     return False
 
 
+def proxy_line(conn: PlainConn) -> bytes:
+    """PROXY protocol v1: "PROXY TCP4 <src> <dst> <sport> <dport>\r\n"."""
+    src = conn.writer.get_extra_info("peername")
+    dst = conn.writer.get_extra_info("sockname")
+    if not src or not dst:
+        return b"PROXY UNKNOWN\r\n"
+    family = "TCP6" if ":" in src[0] else "TCP4"
+    return f"PROXY {family} {src[0]} {dst[0]} {src[1]} {dst[1]}\r\n".encode()
+
+
 class CertStore:
     """The relay's own certificate (for the relay host and the login host),
     read from files and read again on SIGHUP, which is what certbot's or
@@ -110,6 +122,8 @@ class Router:
         self.limits = svc.cfg.limits
         self._pending = asyncio.Semaphore(self.limits.max_pending_connections)
         self._tasks: set[asyncio.Task] = set()
+        self.sni_routes = {name: r for r in self.cfg.routes for name in r.sni}
+        self.host_routes = {name: r for r in self.cfg.routes for name in r.host}
 
     # --- helpers -------------------------------------------------------------
 
@@ -144,6 +158,22 @@ class Router:
         finally:
             self.svc.peers.pop(local_port, None)
 
+    async def _passthrough(self, conn: PlainConn, route, prefix: bytes) -> None:
+        """A static route: the connection goes to its upstream as it came,
+        like a cloud's does to its box, optionally announced with a PROXY
+        protocol line so the upstream knows who is really calling.
+        """
+        try:
+            reader, writer = await asyncio.open_connection(*route.upstream)
+        except OSError:
+            await conn.close()
+            return
+        upstream = PlainConn(reader, writer)
+        if route.proxy_protocol:
+            prefix = proxy_line(conn) + prefix
+        await upstream.write(prefix)
+        await splice(conn, upstream)
+
     async def _control(self, conn: Conn, prefix: bytes, remote: str, plain: bool) -> None:
         await self._forward(conn, "127.0.0.1", self.svc.control_port, prefix, remote, plain)
 
@@ -174,6 +204,9 @@ class Router:
             name, hello = peeked
             if name in (self.cfg.relay_host, self.cfg.login_host):
                 await self._own_tls(conn, name, hello, remote)
+                return
+            if name in self.sni_routes:
+                await self._passthrough(conn, self.sni_routes[name], hello)
                 return
             cloud, tunnel = self._cloud_for_host(name)
             if tunnel is None:
@@ -286,6 +319,9 @@ class Router:
             if head.host == self.cfg.login_host:
                 conn.unread(head.raw)
                 await self._login_host(conn, remote, plain=True)
+                return
+            if head.host in self.host_routes:
+                await self._passthrough(conn, self.host_routes[head.host], head.raw)
                 return
             cloud, tunnel = self._cloud_for_host(head.host)
             if tunnel is None:

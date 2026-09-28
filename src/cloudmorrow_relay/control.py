@@ -260,6 +260,8 @@ def create_app(svc) -> FastAPI:
         except NameTaken:
             raise HTTPException(409, f"The name {name} is taken.") from None
         log.info("cloud %s claimed %s", cloud.id, name)
+        # Clears anything a previous owner of the name left in DNS.
+        await svc.dns_changed([name])
         return {
             "cloud_id": cloud.id,
             "token": token,
@@ -302,6 +304,7 @@ def create_app(svc) -> FastAPI:
             if not body.public:
                 await svc.registry.drop(cloud.id)
         svc.update_mesh_records()
+        await svc.dns_changed([cloud.name, store.cloud(cloud.id).name])
         return record(store.cloud(cloud.id))
 
     @app.delete("/v1/clouds/me", status_code=204)
@@ -316,6 +319,7 @@ def create_app(svc) -> FastAPI:
         await svc.registry.drop(cloud.id)
         store.delete_cloud(cloud.id)
         svc.update_mesh_records()
+        await svc.dns_changed([cloud.name])
         log.info("cloud %s gave its name back", cloud.id)
         return Response(status_code=204)
 
@@ -387,6 +391,7 @@ def create_app(svc) -> FastAPI:
             address = str(ip)
         store.set_mesh_address(cloud.id, address)
         svc.update_mesh_records()
+        await svc.dns_changed([cloud.name])
         return {"address": address}
 
     # --- acme-dns ------------------------------------------------------------
@@ -424,6 +429,10 @@ def create_app(svc) -> FastAPI:
         if not ACME_TXT_RE.match(body.txt):
             raise HTTPException(400, "txt: an ACME challenge value is 43 base64url characters.")
         store.acme_set_txt(cloud.id, body.txt)
+        # The one change that must be in DNS before we answer: the box's
+        # ACME client asks Let's Encrypt to look right after.
+        if not await svc.dns_changed([cloud.name], strict=True):
+            raise HTTPException(502, "The DNS provider did not take the record. Try again.")
         return {"txt": body.txt}
 
     # --- the relay's own certificate (port 80) --------------------------------
