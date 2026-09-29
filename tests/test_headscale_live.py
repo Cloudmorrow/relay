@@ -166,7 +166,9 @@ async def test_a_phone_registration_lands_in_the_right_user(headscale):
     nodes = await headscale.list_nodes("cloud-aaaaaaaaaaaaaaaa")
     assert [n["id"] for n in nodes] == [node["id"]]
     assert await headscale.list_nodes("cloud-bbbbbbbbbbbbbbbb") == []
-    assert device(nodes[0], {("node", str(node["id"])): "Anna's phone"})["label"] == "Anna's phone"
+    assert device(nodes[0])["id"] == str(node["id"])
+    all_nodes = await headscale.all_nodes()
+    assert str(node["id"]) in [str(n["id"]) for n in all_nodes]
     # Giving the name back takes the devices with it.
     await headscale.delete_user("cloud-aaaaaaaaaaaaaaaa")
     assert await headscale.find_user("cloud-aaaaaaaaaaaaaaaa") is None

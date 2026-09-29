@@ -9,7 +9,7 @@ import pytest
 from cloudmorrow_relay.cloudflare import CloudflareDns
 from cloudmorrow_relay.dnsbackend import DnsError
 from cloudmorrow_relay.service import start_uvicorn
-from conftest import ZONE, auth
+from conftest import ZONE, auth, join
 from fakecloudflare import FakeCloudflare
 
 TOKEN = "cf-test-token"
@@ -56,7 +56,7 @@ async def test_no_dns_server_is_started(svc, fake_cf):
     assert isinstance(svc.dns, CloudflareDns)
 
 
-async def test_public_cloud_needs_no_records(svc, enrol, fake_cf):
+async def test_a_cloud_needs_no_records(svc, enrol, fake_cf):
     await enrol("larsens")
     assert ours(fake_cf) == set()
 
@@ -79,20 +79,25 @@ async def test_acme_values_go_to_cloudflare(svc, api, enrol, fake_cf):
     assert [r["content"] for r in fake_cf.find(f"_acme-challenge.{host}") if r["comment"] != TAG] == ['"made by hand"']
 
 
-async def test_private_cloud_gets_its_mesh_address(svc, api, enrol, fake_cf):
+async def test_the_mesh_address_is_never_published(svc, api, enrol, fake_cf):
     cloud = await enrol("larsens")
-    h = auth(cloud["token"])
-    key = (await api.post("/v1/clouds/me/mesh/keys", headers=h)).json()
-    node = (await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/join", json={"key": key["key"]})).json()["node"]
-    address = node["ipAddresses"][0]
-    await api.put("/v1/clouds/me/mesh/address", json={"address": address}, headers=h)
-    assert ours(fake_cf) == set()  # still public: the wildcard is right
-    await api.patch("/v1/clouds/me", json={"public": False}, headers=h)
-    assert ours(fake_cf) == {("A", f"larsens.{ZONE}", address)}
-    await api.patch("/v1/clouds/me", json={"name": "jensens"}, headers=h)
-    assert ours(fake_cf) == {("A", f"jensens.{ZONE}", address)}
-    await api.patch("/v1/clouds/me", json={"public": True}, headers=h)
+    key = (await api.post("/v1/clouds/me/mesh/keys", headers=auth(cloud["token"]))).json()
+    await join(svc, api, key["key"])
+    await svc.meshwatch.refresh()
+    assert svc.store.cloud(cloud["cloud_id"]).mesh_address
+    await svc.dns.sync_all()
     assert ours(fake_cf) == set()
+
+
+async def test_a_rename_moves_the_records(svc, api, admin, link_box, fake_cf):
+    cloud = await link_box("larsens")
+    creds = {"X-Api-User": cloud["acme_dns"]["username"], "X-Api-Key": cloud["acme_dns"]["password"],
+             "subdomain": cloud["acme_dns"]["subdomain"]}
+    await post_txt(api, creds, "r" * 43)
+    resp = await admin.patch(f"/admin/v1/clouds/{cloud['cloud_id']}", json={"account": cloud["account"], "name": "jensens"})
+    assert resp.status_code == 200
+    names = {n for _, n, _ in ours(fake_cf)}
+    assert names == {f"jensens.{ZONE}", f"_acme-challenge.jensens.{ZONE}"}
 
 
 async def test_deleting_a_cloud_removes_its_records(svc, api, enrol, fake_cf):
@@ -112,9 +117,6 @@ async def test_cloudflare_down_fails_the_acme_update(svc, api, enrol, fake_cf):
     resp = await post_txt(api, creds, "y" * 43)
     assert resp.status_code == 502
     assert "DNS provider" in resp.json()["detail"]
-    # Other changes do not fail the call; the periodic sync heals them.
-    resp = await api.patch("/v1/clouds/me", json={"public": False}, headers=auth(cloud["token"]))
-    assert resp.status_code == 200
     fake_cf.fail = False
     await svc.dns.sync_all()
     assert ("TXT", f"_acme-challenge.larsens.{ZONE}", '"' + "y" * 43 + '"') in ours(fake_cf)

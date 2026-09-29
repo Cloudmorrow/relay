@@ -2,17 +2,19 @@
 
 The zone has `*.<zone>` pointing at this machine (DNS only, not proxied:
 the relay must see the visitor's TLS as it is). That one record already
-makes every public cloud's name, the relay host and the login host resolve.
-What it cannot say, the relay writes, and only that:
+makes every cloud's name (its landing page), the relay host and the login
+host resolve. What it cannot say, the relay writes, and only that:
 
 - `_acme-challenge.<name>` TXT, the values a box posts to
   /v1/acme-dns/update (the latest two, as acme-dns keeps);
-- `<name>` A/AAAA → the box's mesh address, for a cloud that is private
-  and has one, instead of the wildcard's relay address;
-- `<name>` A/AAAA → the relay's own address, for a public cloud that has
+- `<name>` A/AAAA → the relay's own address, for a cloud that has
   challenge values. The TXT record makes `<name>` an "empty non-terminal",
   and by the DNS rules (RFC 4592) a wildcard does not cover those; an
   explicit record says what the wildcard would have.
+
+A box's mesh address is never published here: devices on the mesh learn
+it from Headscale's extra records (meshwatch.py), and everybody else gets
+the landing page.
 
 Every record the relay creates carries the comment `cloudmorrow-relay`
 (`dns.tag`), and the relay only ever changes or deletes records carrying
@@ -25,7 +27,6 @@ from the config file; it needs Zone → DNS → Edit on this one zone.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
 
@@ -120,10 +121,7 @@ class CloudflareDns(DnsBackend):
         host, challenge = self._fqdns(name)
         txts = self.store.acme_txt(cloud.id)
         want = {("TXT", challenge, _txt(t)) for t in txts}
-        if not cloud.public and cloud.mesh_address:
-            ip = ipaddress.ip_address(cloud.mesh_address)
-            want.add(("A" if ip.version == 4 else "AAAA", host, str(ip)))
-        elif cloud.public and txts:
+        if txts:
             if self.cfg.public_ipv4:
                 want.add(("A", host, self.cfg.public_ipv4))
             if self.cfg.public_ipv6:

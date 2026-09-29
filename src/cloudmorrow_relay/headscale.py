@@ -11,17 +11,22 @@ Written against Headscale's REST API (`/api/v1`, API key auth) as of 0.29;
 0.26 is the oldest it can work with, since that is where pre-auth keys
 started taking a user id rather than a name.
 
+The box is the node named `cloud` (the hostname the core gives it) in its
+cloud's user. The relay reads its addresses and whether it is online from
+here (meshwatch.py), and never asks the box.
+
 The DNS name inside the mesh (`<name>.<zone>` → the box's mesh address)
 has no API: Headscale reads extra records from a JSON file and watches it
 (`dns.extra_records_path`). The relay rewrites that file whole, atomically,
-whenever a cloud's name or mesh address changes. It is one file for the
-whole tailnet, so every enrolled device can resolve every cloud's name to
-its mesh address; the policy is what keeps them from reaching it.
+whenever a cloud's name or its box's addresses change. It is one file for
+the whole tailnet, so every enrolled device can resolve every cloud's name
+to its mesh address; the policy is what keeps them from reaching it.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import json
 import os
 import tempfile
@@ -121,6 +126,10 @@ class Headscale:
         )
         return data["preAuthKey"]
 
+    async def all_nodes(self) -> list[dict]:
+        data = await self._call("GET", "/node")
+        return data.get("nodes", [])
+
     async def list_nodes(self, user_name: str) -> list[dict]:
         data = await self._call("GET", "/node", params={"user": user_name})
         # Filter again ourselves: an unknown user must never mean "all".
@@ -145,20 +154,50 @@ class Headscale:
         return data.get("policy", "")
 
 
-def device(node: dict, labels: dict[tuple[str, str], str]) -> dict:
-    """A Headscale node as the control API shows it."""
-    key_id = str((node.get("preAuthKey") or {}).get("id") or "")
-    node_id = str(node["id"])
-    label = labels.get(("node", node_id)) or labels.get(("key", key_id)) or ""
+BOX_HOSTNAME = "cloud"
+
+
+def device(node: dict) -> dict:
+    """A Headscale node as the control API shows it: no name. The box keeps
+    its own labels, joined to these by `id`; a phone's own device name
+    stays in Headscale.
+    """
     return {
-        "id": node_id,
-        "name": node.get("givenName") or node.get("name") or "",
-        "label": label,
-        "addresses": node.get("ipAddresses", []),
+        "id": str(node["id"]),
+        "address": addresses(node)[0],
         "online": bool(node.get("online")),
         "last_seen": node.get("lastSeen"),
-        "created_at": node.get("createdAt"),
     }
+
+
+def addresses(node: dict) -> tuple[str | None, str | None]:
+    """A node's mesh IPv4 and IPv6 address."""
+    v4 = v6 = None
+    for value in node.get("ipAddresses") or []:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if ip.version == 4 and v4 is None:
+            v4 = str(ip)
+        elif ip.version == 6 and v6 is None:
+            v6 = str(ip)
+    return v4, v6
+
+
+def box_node(nodes: list[dict], user_name: str) -> dict | None:
+    """The cloud's box among `nodes`: the node with hostname `cloud` in
+    the cloud's user. A box that joined again leaves an old node behind
+    until it is removed; the one online, else the one seen last, wins.
+    """
+    mine = [
+        n for n in nodes
+        if (n.get("user") or {}).get("name") == user_name
+        and BOX_HOSTNAME in (n.get("name"), n.get("givenName"))
+    ]
+    if not mine:
+        return None
+    return max(mine, key=lambda n: (bool(n.get("online")), n.get("lastSeen") or "", str(n.get("id"))))
 
 
 def write_extra_records(path: Path, records: list[dict]) -> None:

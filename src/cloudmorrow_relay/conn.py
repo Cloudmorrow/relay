@@ -160,19 +160,6 @@ class TLSConn(Conn):
         await self.raw.close()
 
 
-async def read_at_least(conn: Conn, n: int, limit: int) -> bytes:
-    """Read until at least `n` bytes (or a newline) have arrived, or the
-    stream ends; at most `limit`. The caller puts a timeout around it.
-    """
-    data = b""
-    while len(data) < n and b"\n" not in data:
-        chunk = await conn.read(limit - len(data))
-        if not chunk:
-            break
-        data += chunk
-    return data
-
-
 async def splice(client: Conn, upstream: Conn, linger: float = 30.0) -> None:
     """Copy both ways until the upstream is done.
 

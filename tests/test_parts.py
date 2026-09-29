@@ -103,7 +103,8 @@ def test_extra_records_file(tmp_path):
 
 def test_dev_command(tmp_path):
     """`cloudmorrow-relay dev` starts, prints where to point the core, and
-    serves an enrolment against its own CA.
+    links a box against its own CA the way the website would, then shows
+    the cloud's landing page.
     """
     base = random.randint(20, 50) * 1000 + random.randint(0, 400)
     proc = subprocess.Popen(
@@ -133,15 +134,24 @@ def test_dev_command(tmp_path):
                     return self.inner.connect_tcp("127.0.0.1", port, timeout, local_address, socket_options)
 
             transport._pool = httpcore.ConnectionPool(ssl_context=ctx, network_backend=Loop())
-            resp = client.post(f"https://relay.cm.localhost:{base + 443}/v1/clouds", json={"name": "larsens"})
-            assert resp.status_code == 201
+            relay = f"https://relay.cm.localhost:{base + 443}"
+            secret = out.split("Authorization: Bearer ", 1)[1].split(")", 1)[0]
+            start = client.post(f"{relay}/v1/links").json()
+            approved = client.post(
+                f"{relay}/admin/v1/links/{start['code']}/approve",
+                json={"account": "acct_dev", "name": "larsens"}, headers={"Authorization": f"Bearer {secret}"},
+            )
+            assert approved.status_code == 201, approved.text
+            resp = client.post(f"{relay}/v1/links/poll", json={"poll": start["poll"]})
+            assert resp.status_code == 200
             assert resp.json()["login_server"] == f"https://mesh.cm.localhost:{base + 443}"
             token = resp.json()["token"]
-            key = client.post(
-                f"https://relay.cm.localhost:{base + 443}/v1/clouds/me/mesh/keys",
-                headers={"Authorization": f"Bearer {token}"},
-            )
+            key = client.post(f"{relay}/v1/clouds/me/mesh/keys", headers={"Authorization": f"Bearer {token}"})
             assert key.status_code == 201  # the fake Headscale is behind it
+            # In dev mode a name can also be claimed at once.
+            assert client.post(f"{relay}/v1/clouds", json={"name": "hansens"}).status_code == 201
+            page = client.get(f"https://larsens.cm.localhost:{base + 443}/")
+            assert page.status_code == 200 and "A Cloudmorrow cloud" in page.text
     finally:
         proc.send_signal(signal.SIGINT)
         try:
@@ -149,6 +159,54 @@ def test_dev_command(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
     assert proc.returncode == 0
+
+
+def test_new_settings(tmp_path):
+    cfg = from_dict({
+        "zone": "a.test", "open_claims": True, "link_url": "https://example.com/link",
+        "admin": {"secret_env": "X_SECRET", "secret_file": "secret.txt"},
+        "landing": {"releases_url": "https://example.com/r", "installer_url": "https://example.com/i.sh"},
+        "headscale": {"poll_seconds": 5},
+    }, base=tmp_path)
+    assert cfg.open_claims and cfg.link_url == "https://example.com/link"
+    assert cfg.admin_secret_env == "X_SECRET" and cfg.admin_secret_file == tmp_path / "secret.txt"
+    assert (cfg.releases_url, cfg.installer_url) == ("https://example.com/r", "https://example.com/i.sh")
+    assert cfg.mesh_poll_seconds == 5
+    assert cfg.cloud_label("larsens.a.test") == "larsens"
+    for host in ("relay.a.test", "mesh.a.test", "a.larsens.a.test", "a.test", "larsens.b.test", None):
+        assert cfg.cloud_label(host) is None
+
+
+def test_an_old_database_is_brought_up_to_date(tmp_path):
+    """A relay that ran the public tunnel: its clouds stay, what they no
+    longer need goes.
+    """
+    import sqlite3
+
+    from cloudmorrow_relay.store import Store
+
+    db = sqlite3.connect(tmp_path / "relay.sqlite")
+    db.executescript("""
+        CREATE TABLE clouds (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL UNIQUE,
+            public INTEGER NOT NULL DEFAULT 1, mesh_address TEXT, bytes_in INTEGER NOT NULL DEFAULT 0,
+            bytes_out INTEGER NOT NULL DEFAULT 0, acme_user TEXT UNIQUE, acme_key_hash TEXT,
+            acme_subdomain TEXT UNIQUE, created_at REAL NOT NULL);
+        CREATE TABLE labels (kind TEXT, ref TEXT, cloud_id TEXT, label TEXT, PRIMARY KEY (kind, ref));
+        CREATE TABLE pair_codes (code_hash TEXT PRIMARY KEY, cloud_id TEXT, label TEXT, expires_at REAL, used_at REAL);
+        INSERT INTO clouds (id, name, token_hash, created_at) VALUES ('c1', 'larsens', 'h', 1.0);
+        INSERT INTO labels VALUES ('node', '1', 'c1', 'Jimmi''s laptop');
+    """)
+    db.commit()
+    db.close()
+    store = Store(tmp_path / "relay.sqlite")
+    cloud = store.cloud("c1")
+    assert cloud.name == "larsens" and cloud.account is None and cloud.show_name is False
+    columns = {r["name"] for r in store._all("PRAGMA table_info(clouds)")}
+    assert not {"public", "bytes_in", "bytes_out"} & columns
+    tables = {r["name"] for r in store._all("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "labels" not in tables and "pair_codes" not in tables and "links" in tables
+    store.close()
+    Store(tmp_path / "relay.sqlite").close()  # and again, with nothing left to do
 
 
 def test_hetzner_config_loads():

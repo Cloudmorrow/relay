@@ -1,4 +1,4 @@
-"""A phone pairs with a code, through the login host, as a browser would."""
+"""A phone pairs with an invite code, through the login host, as a browser would."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ async def pending(svc, api) -> str:
     return (await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/pending")).json()["auth_id"]
 
 
-async def code_for(api, token: str, label: str = "Anna's phone") -> str:
-    resp = await api.post("/v1/clouds/me/mesh/pair", json={"for": label}, headers=auth(token))
+async def code_for(api, token: str) -> str:
+    resp = await api.post("/v1/clouds/me/mesh/invites", headers=auth(token))
     assert resp.status_code == 201
     return resp.json()["code"]
 
@@ -30,7 +30,7 @@ async def test_the_register_page_is_ours(svc, api, browser):
     auth_id = await pending(svc, api)
     resp = await browser.get(f"/register/{auth_id}")
     assert resp.status_code == 200
-    assert "Pair a device" in resp.text and "headscale nodes register" not in resp.text
+    assert "Invite a device" in resp.text and "headscale nodes register" not in resp.text
     assert "default-src 'none'" in resp.headers["content-security-policy"]
 
 
@@ -46,7 +46,8 @@ async def test_pairing_registers_the_phone_to_the_right_cloud(svc, api, browser,
     node = next(iter(svc.fake.nodes.values()))
     assert node["user"]["name"] == f"cloud-{cloud['cloud_id']}"
     devices = (await api.get("/v1/clouds/me/mesh/devices", headers=auth(cloud["token"]))).json()["devices"]
-    assert devices[0]["label"] == "Anna's phone"
+    # The phone's own device name stays in Headscale.
+    assert [d["id"] for d in devices] == [node["id"]] and "phone" not in str(devices)
 
     # A code works once.
     again = await pending(svc, api)
@@ -62,10 +63,18 @@ async def test_wrong_and_expired_codes(svc, api, browser, enrol):
         assert resp.status_code == 400
         assert "<script>" not in resp.text
     code = await code_for(api, cloud["token"])
-    svc.store._exec("UPDATE pair_codes SET expires_at = ?", time.time() - 1)
+    svc.store._exec("UPDATE invites SET expires_at = ?", time.time() - 1)
     resp = await browser.post(f"/register/{auth_id}", data={"code": code})
     assert resp.status_code == 400
     assert not svc.fake.nodes
+
+
+async def test_an_invite_used_by_a_computer_is_gone_for_a_phone(svc, api, browser, enrol):
+    cloud = await enrol()
+    code = await code_for(api, cloud["token"])
+    assert (await api.post("/v1/invites/redeem", json={"name": "larsens", "code": code})).status_code == 201
+    auth_id = await pending(svc, api)
+    assert (await browser.post(f"/register/{auth_id}", data={"code": code})).status_code == 400
 
 
 async def test_an_unknown_registration_gives_the_code_back(svc, api, browser, enrol):
@@ -109,7 +118,7 @@ async def test_codes_per_cloud_are_rate_limited(two_codes, api, enrol):
     cloud = await enrol()
     await code_for(api, cloud["token"])
     await code_for(api, cloud["token"])
-    resp = await api.post("/v1/clouds/me/mesh/pair", json={"for": "x"}, headers=auth(cloud["token"]))
+    resp = await api.post("/v1/clouds/me/mesh/invites", headers=auth(cloud["token"]))
     assert resp.status_code == 429
 
 

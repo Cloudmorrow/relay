@@ -65,11 +65,14 @@ async def _dev(folder: Path, base: int) -> None:
 
     relay_host, login_host = f"relay.{DEV_ZONE}", f"mesh.{DEV_ZONE}"
     ca = DevCA(folder / "tls")
-    own = ca.issue("relay", [relay_host, login_host])
+    own = ca.issue("relay", [f"*.{DEV_ZONE}", relay_host, login_host])
     box = ca.issue("box", [f"*.{DEV_ZONE}", DEV_ZONE])
     bundle = ca.bundle()
 
     api_key = "dev-headscale-api-key"
+    admin_secret = "dev-admin-secret-not-for-real-use"
+    os.environ.setdefault("RELAY_ADMIN_SECRET", admin_secret)
+    admin_secret = os.environ["RELAY_ADMIN_SECRET"]
     fake = FakeHeadscale(api_key)
     hs_server, hs_task = await start_uvicorn(fake.app, host="127.0.0.1", port=hs_port)
 
@@ -87,8 +90,14 @@ async def _dev(folder: Path, base: int) -> None:
             "api_key": api_key,
             "extra_records_path": str(folder / "state" / "extra-records.json"),
         },
+        # Anybody may claim a name here, as before linking existed; the
+        # link flow works too, with the admin secret below.
+        "open_claims": True,
         # A laptop tries things over and over.
-        "limits": {"enrol_per_hour": 1000, "pair_codes_per_hour": 1000, "mesh_keys_per_hour": 1000},
+        "limits": {
+            "enrol_per_hour": 1000, "links_per_hour": 1000, "pair_codes_per_hour": 1000,
+            "mesh_keys_per_hour": 1000,
+        },
     })
     svc = Service(cfg)
     await svc.start()
@@ -98,8 +107,8 @@ async def _dev(folder: Path, base: int) -> None:
 Cloudmorrow relay {__version__}, dev mode — everything on this machine, nothing real.
 
   control server   {control}
-  tunnel           {relay_host}:{https}  (TLS, then "CMTUNNEL/1 <cloud_id> <token>\\n")
-  public names     https://<name>.{DEV_ZONE}:{https}   http://<name>.{DEV_ZONE}:{http}
+  admin API        {control}/admin/v1   (Authorization: Bearer {admin_secret})
+  landing pages    https://<name>.{DEV_ZONE}:{https}   (http on :{http} redirects there)
   login server     https://{login_host}:{https}   (a fake Headscale behind it, on :{hs_port})
   DNS              dig @127.0.0.1 -p {dns} <name>.{DEV_ZONE}
   state            {folder}
@@ -107,16 +116,20 @@ Cloudmorrow relay {__version__}, dev mode — everything on this machine, nothin
 Certificates (a throwaway CA, valid 30 days):
   CA               {ca.path}
   CA + public roots {bundle}
+  relay            {own.cert}   (*.{DEV_ZONE}, {relay_host}, {login_host})
   for the box      {box.cert}  {box.key}   (*.{DEV_ZONE})
 
 Point the core at it:
   access_control = "{control}"
   SSL_CERT_FILE={bundle}   (so the core trusts the relay)
-  The tunnel is dialled at the host and port of access_control ({relay_host}:{https}).
   The box's local TLS upstream (Caddy) serves the box certificate above.
 
-Try it:
-  curl --cacert {ca.path} -X POST {control}/v1/clouds -H 'content-type: application/json' -d '{{"name": "larsens"}}'
+Try it: link a box the way the website approves it (or, in dev mode only,
+POST /v1/clouds {{"name": "larsens"}} claims a name at once).
+  curl --cacert {ca.path} -X POST {control}/v1/links
+  curl --cacert {ca.path} -X POST {control}/admin/v1/links/<code>/approve -H 'authorization: Bearer {admin_secret}' \\
+       -H 'content-type: application/json' -d '{{"account": "acct_dev", "name": "larsens"}}'
+  curl --cacert {ca.path} -X POST {control}/v1/links/poll -H 'content-type: application/json' -d '{{"poll": "<poll>"}}'
   curl --cacert {ca.path} {control}/v1/clouds/me -H 'authorization: Bearer <token>'
 
 Ctrl-C stops it.

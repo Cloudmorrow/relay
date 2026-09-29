@@ -6,13 +6,12 @@ Two ways to run the zone:
   (dnsserver.py). It answers from the database directly, so a change needs
   no pushing anywhere; the hooks below do nothing.
 - **cloudflare**: the zone lives at Cloudflare, with a wildcard
-  (`*.<zone>` → this machine) that already says what a public cloud needs.
+  (`*.<zone>` → this machine) that already says what a cloud's name needs.
   The relay writes only what a wildcard cannot express (cloudflare.py).
 
-The control API calls `names_changed` after anything that can change what
-DNS should say about a name (a claim, a rename, public on or off, a mesh
-address, an ACME challenge value, a deletion); the backend brings those
-names in line. A periodic full sync heals whatever a failed call left
+The control and admin APIs call `names_changed` after anything that can
+change what DNS should say about a name (a link, a rename, an ACME
+challenge value, an unlink); the backend brings those names in line. A periodic full sync heals whatever a failed call left
 behind.
 """
 

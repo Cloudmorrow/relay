@@ -21,7 +21,7 @@ from conftest import MESH, RELAY, visit
 
 @pytest.fixture
 def fake_lego(tmp_path, ca):
-    issued = ca.issue("from-lego", [RELAY, MESH])
+    issued = ca.issue("from-lego", ["*.cm.test"])
     log = tmp_path / "lego-calls.txt"
     script = tmp_path / "lego"
     script.write_text(textwrap.dedent(f"""\
@@ -61,7 +61,10 @@ async def test_lego_gets_the_certificate_and_the_relay_serves_it(svc, fake_lego)
     assert served == expected
     writer.close()
     call, token = fake_lego["log"].read_text().splitlines()[:2]
-    assert f"--domains {RELAY} --domains {MESH}" in call
+    # One wildcard covers the relay host, the login host and the landing
+    # pages; listing them as well would make Let's Encrypt refuse.
+    assert "--domains *.cm.test --force-cert-domains" in call
+    assert RELAY not in call and MESH not in call
     assert "--dns cloudflare" in call and "--email ops@example.com" in call
     assert token == "cf-token-for-lego"
     assert oct(svc.cfg.tls_key.stat().st_mode & 0o777) == "0o600"
@@ -74,6 +77,16 @@ def test_http_challenge_command(tmp_path):
     cmd = lego_command(cfg)
     assert "--http.webroot" in cmd and str(tmp_path / "acme") in cmd
     assert "--dns" not in cmd
+    # HTTP-01 cannot get a wildcard: the relay's two names only.
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--domains"] == ["relay.a.test", "mesh.a.test"]
+
+
+def test_deeper_names_are_listed_beside_the_wildcard(tmp_path):
+    from cloudmorrow_relay.config import from_dict
+
+    cfg = from_dict({"zone": "a.test", "relay_host": "api.relay.a.test", "state_dir": str(tmp_path), "tls": {"acme": "lego"}})
+    cmd = lego_command(cfg)
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--domains"] == ["*.a.test", "api.relay.a.test"]
     assert cfg.tls_cert == tmp_path / "tls" / "fullchain.pem"
 
 

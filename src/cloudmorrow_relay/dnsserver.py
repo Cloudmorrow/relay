@@ -2,16 +2,17 @@
 
 The zone's parent delegates to this server (NS records and glue at the
 registrar), and it answers from the same database the control API writes,
-so a claimed name, a rename, a switch to private or a new ACME challenge
-value is in DNS the moment the call returns. Nothing to sync, no API
+so a linked name, a rename, an unlink or a new ACME challenge value is in
+DNS the moment the call returns. Nothing to sync, no API
 tokens for a DNS provider anywhere.
 
 What it answers:
 
     <zone>, and names from [[dns.records]]    the operator's static records
     relay host, login host, nameservers     the relay's public addresses
-    <name>.<zone>, public                    the relay's public addresses
-    <name>.<zone>, private with a mesh addr  the mesh address
+    <name>.<zone>                            the relay's public addresses
+                                             (the landing page; devices on
+                                             the mesh ask Headscale instead)
     _acme-challenge.<name>.<zone> TXT        the cloud's latest two values
 
 Anything else inside the zone is NXDOMAIN; anything outside it is REFUSED
@@ -23,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ipaddress
 import logging
 import socket
 import time
@@ -100,13 +100,7 @@ class Authority:
             cloud = self.store.cloud_by_name(labels[0])
             if cloud is None:
                 return None
-            if cloud.public:
-                return self._address_rrs(name, self.cfg.public_ipv4, self.cfg.public_ipv6, ttl)
-            if cloud.mesh_address:
-                ip = ipaddress.ip_address(cloud.mesh_address)
-                v4, v6 = (str(ip), None) if ip.version == 4 else (None, str(ip))
-                return self._address_rrs(name, v4, v6, ttl)
-            return []  # the name exists (it is claimed), with nothing to say
+            return self._address_rrs(name, self.cfg.public_ipv4, self.cfg.public_ipv6, ttl)
         if len(labels) == 2 and labels[0] == "_acme-challenge":
             cloud = self.store.cloud_by_name(labels[1])
             if cloud is None:

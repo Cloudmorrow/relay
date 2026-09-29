@@ -1,15 +1,19 @@
-"""Pairing a phone with a six-character code.
+"""Invite codes, and pairing a phone with one.
+
+An invite is six characters, made by a cloud (Me → Invite a device), good
+once, for ten minutes. It works two ways: a computer's client installer
+trades it for a one-time key (`POST /v1/invites/redeem`, control.py), and a
+phone types it on the page here.
 
 A phone joins the mesh through Tailscale's own app, pointed at the login
 server. The app asks Headscale to register it; Headscale answers with a
 URL, `/register/<auth_id>`, and the app opens it in a browser. Headscale's
-own page there tells an administrator to run a command. Ours asks for a
-code instead: the relay routes browsers on the login host here (router.py),
-so the person sees this page, types the code their cloud gave them (Me →
-Pair a device), and the relay registers the phone to that cloud's
-Headscale user. The code is the only thing that says which cloud: it works
-once, for ten minutes, and guessing is rate limited per address and per
-waiting phone.
+own page there tells an administrator to run a command. Ours asks for the
+invite code instead: the relay routes browsers on the login host here
+(router.py), so the person sees this page, types the code, and the relay
+registers the phone to that cloud's Headscale user. The code is the only
+thing that says which cloud, and guessing is rate limited per address and
+per waiting phone.
 
 The pages are deliberately plain HTML with no script, a strict content
 security policy, and every value escaped.
@@ -50,11 +54,11 @@ def normalise_code(value: str) -> str | None:
     return code
 
 
-def issue_code(store, cloud_id: str, label: str) -> tuple[str, float]:
+def issue_code(store, cloud_id: str) -> tuple[str, float]:
     expires = time.time() + CODE_LIFETIME
     while True:
         code = new_code()
-        if store.add_pair_code(cloud_id, code, label, expires):
+        if store.add_invite(cloud_id, code, expires):
             return code, expires
 
 
@@ -82,11 +86,11 @@ def page(title: str, body: str, status: int = 200) -> HTMLResponse:
 def form(auth_id: str, error: str = "") -> str:
     err = f'<p class="err">{html.escape(error)}</p>' if error else ""
     return f"""<h1>Pair this device</h1>
-<p>Open your cloud, go to <b>Me → Pair a device</b>, and type the code it shows.</p>
+<p>Ask someone on the cloud for an invite (<b>Me → Invite a device</b>), and type its code.</p>
 {err}
 <form method="post" action="/register/{html.escape(auth_id)}">
 <input name="code" autocomplete="one-time-code" autocapitalize="characters"
- maxlength="9" required autofocus aria-label="Pairing code">
+ maxlength="9" required autofocus aria-label="Invite code">
 <button type="submit">Pair</button>
 </form>"""
 
@@ -108,25 +112,24 @@ def router(svc) -> APIRouter:
         if not svc.pair_attempts.allow(f"ip:{ip}") or not svc.pair_attempts.allow(f"reg:{auth_id}"):
             return page(
                 "Too many tries",
-                form(auth_id, "Too many tries. Wait a few minutes, then ask your cloud for a new code."),
+                form(auth_id, "Too many tries. Wait a few minutes, then ask for a new invite."),
                 429,
             )
         normal = normalise_code(code)
-        claim = svc.store.claim_pair_code(normal) if normal else None
-        if claim is None:
+        cloud = svc.store.claim_invite(normal) if normal else None
+        if cloud is None:
             return page(
                 "Pair this device",
-                form(auth_id, "That code did not work. Codes work once, for ten minutes."),
+                form(auth_id, "That code did not work. Invites work once, for ten minutes."),
                 400,
             )
-        cloud, label = claim
         if svc.headscale is None:
-            svc.store.release_pair_code(normal)
-            return page("Not available", "<h1>Private access is not set up on this server.</h1>", 503)
+            svc.store.release_invite(normal)
+            return page("Not available", "<h1>The mesh is not set up on this server.</h1>", 503)
         try:
-            node = await svc.headscale.register_node(cloud.mesh_user, auth_id)
+            await svc.headscale.register_node(cloud.mesh_user, auth_id)
         except Exception as exc:  # HeadscaleError, or anything on the way
-            svc.store.release_pair_code(normal)
+            svc.store.release_invite(normal)
             status = getattr(exc, "status", None)
             if status and 400 <= status < 500:
                 message = (
@@ -136,7 +139,6 @@ def router(svc) -> APIRouter:
             else:
                 message = "The coordination server did not answer. Try again in a minute."
             return page("Pair this device", form(auth_id, message), 502)
-        svc.store.set_label("node", str(node.get("id")), cloud.id, label)
         host = html.escape(svc.cfg.public_host(cloud.name))
         return page(
             "Paired",

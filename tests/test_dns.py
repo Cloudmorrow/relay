@@ -8,7 +8,7 @@ import socket
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from conftest import MESH, RELAY, ZONE, auth
+from conftest import MESH, RELAY, ZONE, auth, join
 
 
 async def ask(svc, name: str, qtype: str = "A", tcp: bool = False) -> DNSRecord:
@@ -39,31 +39,20 @@ async def test_apex_and_static_records(svc):
     assert www.rr[0].rtype == QTYPE.CNAME
 
 
-async def test_public_cloud_points_at_the_relay(svc, enrol):
+async def test_a_cloud_points_at_the_relay(svc, enrol):
     await enrol("larsens")
     assert answers(await ask(svc, f"larsens.{ZONE}")) == ["203.0.113.7"]
     assert answers(await ask(svc, f"LarSens.{ZONE}", "AAAA")) == ["2001:db8::7"]
 
 
-async def test_private_cloud_points_at_its_mesh_address(svc, api, enrol):
+async def test_never_the_mesh_address(svc, api, enrol):
     cloud = await enrol("larsens")
-    h = auth(cloud["token"])
-    key = (await api.post("/v1/clouds/me/mesh/keys", headers=h)).json()
-    node = (await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/join", json={"key": key["key"]})).json()["node"]
-    await api.put("/v1/clouds/me/mesh/address", json={"address": node["ipAddresses"][0]}, headers=h)
-    # Public on: still the relay for everybody (the mesh has its own record).
+    key = (await api.post("/v1/clouds/me/mesh/keys", headers=auth(cloud["token"]))).json()
+    await join(svc, api, key["key"])
+    await svc.meshwatch.refresh()
+    assert svc.store.cloud(cloud["cloud_id"]).mesh_address
+    # Everybody outside the mesh gets the relay (the landing page).
     assert answers(await ask(svc, f"larsens.{ZONE}")) == ["203.0.113.7"]
-    await api.patch("/v1/clouds/me", json={"public": False}, headers=h)
-    assert answers(await ask(svc, f"larsens.{ZONE}")) == [node["ipAddresses"][0]]
-    empty = await ask(svc, f"larsens.{ZONE}", "AAAA")
-    assert empty.header.rcode == RCODE.NOERROR and not empty.rr and empty.auth
-
-
-async def test_private_without_a_mesh_address_has_no_address(svc, api, enrol):
-    cloud = await enrol("larsens")
-    await api.patch("/v1/clouds/me", json={"public": False}, headers=auth(cloud["token"]))
-    reply = await ask(svc, f"larsens.{ZONE}")
-    assert reply.header.rcode == RCODE.NOERROR and not reply.rr
 
 
 async def test_acme_update_is_visible_in_dns(svc, api, enrol):

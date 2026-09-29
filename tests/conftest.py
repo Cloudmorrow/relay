@@ -1,20 +1,18 @@
 """The relay, for real, on loopback.
 
-Every test that needs it gets a whole Service (relay, control API, DNS)
-on ports the kernel picks, with a throwaway CA, a fake Headscale on its
-own port, and a "box": the reference tunnel client plus two upstreams
-standing in for the box's Caddy (TLS with the box's own certificate on
-443, plain HTTP on 80).
+Every test that needs it gets a whole Service (relay, control API, admin
+API, landing pages, DNS) on ports the kernel picks, with a throwaway CA
+and a fake Headscale on its own port.
 
 Names are under `cm.test`. Nothing resolves them; clients connect to
 127.0.0.1 and send the name as SNI or Host, which is all the relay sees.
+Names are claimed openly (`open_claims`) unless a test turns it off; the
+link flow, as the website drives it, is `link_box`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hashlib
 import ssl
 import sys
 from pathlib import Path
@@ -29,19 +27,19 @@ from cloudmorrow_relay.config import from_dict  # noqa: E402
 from cloudmorrow_relay.devcerts import DevCA  # noqa: E402
 from cloudmorrow_relay.fakeheadscale import FakeHeadscale  # noqa: E402
 from cloudmorrow_relay.service import Service, start_uvicorn  # noqa: E402
-from refclient import RefBox  # noqa: E402
 
 ZONE = "cm.test"
 RELAY = f"relay.{ZONE}"
 MESH = f"mesh.{ZONE}"
 HS_KEY = "test-headscale-key"
+ADMIN_SECRET = "test-admin-secret-0123456789abcdef"
 
 
 @pytest.fixture(scope="session")
 def ca(tmp_path_factory):
     folder = tmp_path_factory.mktemp("ca")
     authority = DevCA(folder)
-    authority.relay = authority.issue("relay", [RELAY, MESH])
+    authority.relay = authority.issue("relay", [f"*.{ZONE}", RELAY, MESH])
     authority.box = authority.issue("box", [f"*.{ZONE}"])
     return authority
 
@@ -89,6 +87,8 @@ def limits():
         "pair_codes_per_hour": 100,
         "pair_attempts_per_10min": 100,
         "mesh_keys_per_hour": 100,
+        "links_per_hour": 100,
+        "redeems_per_name_10min": 100,
         "bad_auth_per_minute": 100,
         "peek_timeout": 2.0,
         "handshake_timeout": 2.0,
@@ -111,9 +111,11 @@ def _merge(base: dict, extra: dict) -> dict:
 
 
 @pytest.fixture
-async def svc(tmp_path, ca, fake_hs, limits, extra_config):
+async def svc(tmp_path, ca, fake_hs, limits, extra_config, monkeypatch):
+    monkeypatch.setenv("RELAY_ADMIN_SECRET", ADMIN_SECRET)
     webroot = tmp_path / "acme"
     cfg = from_dict(_merge({
+        "open_claims": True,
         "zone": ZONE,
         "relay_host": RELAY,
         "login_host": MESH,
@@ -165,87 +167,41 @@ def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-# --- the box's upstreams ---------------------------------------------------
+@pytest.fixture
+async def admin(svc):
+    """The website's side: the admin API with the secret."""
+    async with loopback_client(
+        svc.ca.path, f"https://{RELAY}:{svc.https_port}", headers={"Authorization": f"Bearer {ADMIN_SECRET}"}
+    ) as client:
+        yield client
 
 
-async def _upstream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """A stand-in for the box's Caddy, speaking a little test protocol:
-    ECHO, SEND <n>, SINK <n>, or an HTTP request.
+@pytest.fixture
+async def link_box(api, admin):
+    """A box linked the whole way: it asks for a code, the website approves
+    it for an account, and the box collects its token.
     """
-    try:
-        line = await reader.readline()
-        if line.startswith(b"ECHO"):
-            writer.write(b"READY\n")
-            while data := await reader.read(65536):
-                writer.write(data)
-                await writer.drain()
-        elif line.startswith(b"SEND "):
-            n = int(line.split()[1])
-            block = bytes(range(256)) * 256
-            sent = 0
-            while sent < n:
-                chunk = block[: min(len(block), n - sent)]
-                writer.write(chunk)
-                await writer.drain()
-                sent += len(chunk)
-        elif line.startswith(b"SINK "):
-            n = int(line.split()[1])
-            digest = hashlib.sha256()
-            total = 0
-            while total < n and (data := await reader.read(min(65536, n - total))):
-                digest.update(data)
-                total += len(data)
-            writer.write(f"{total} {digest.hexdigest()}\n".encode())
-            await writer.drain()
-        elif b"HTTP/1." in line:
-            head = [line]
-            while (h := await reader.readline()) not in (b"\r\n", b"\n", b""):
-                head.append(h)
-            host = next((h.split(b":", 1)[1].strip() for h in head if h.lower().startswith(b"host:")), b"")
-            path = line.split(b" ")[1]
-            body = b"box saw host=" + host + b" path=" + path
-            writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
-                + b"\r\nConnection: close\r\n\r\n" + body
-            )
-            await writer.drain()
-    except (ConnectionError, OSError, ssl.SSLError):
-        pass
-    finally:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+
+    async def link(name: str = "larsens", account: str = "acct_0123456789abcdef01234567") -> dict:
+        start = (await api.post("/v1/links")).json()
+        resp = await admin.post(f"/admin/v1/links/{start['code']}/approve", json={"account": account, "name": name})
+        assert resp.status_code == 201, resp.text
+        got = await api.post("/v1/links/poll", json={"poll": start["poll"]})
+        assert got.status_code == 200, got.text
+        return got.json() | {"account": account}
+
+    return link
 
 
-@pytest.fixture
-async def upstreams(ca):
-    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    ctx.load_cert_chain(ca.box.cert, ca.box.key)
-    tls = await asyncio.start_server(_upstream_handler, "127.0.0.1", 0, ssl=ctx)
-    plain = await asyncio.start_server(_upstream_handler, "127.0.0.1", 0)
-    ports = {443: ("127.0.0.1", tls.sockets[0].getsockname()[1]), 80: ("127.0.0.1", plain.sockets[0].getsockname()[1])}
-    yield ports
-    tls.close()
-    plain.close()
-
-
-@pytest.fixture
-async def box(svc, enrol, upstreams):
-    """A claimed cloud with its tunnel up."""
-    cloud = await enrol("larsens")
-    ref = RefBox(svc.https_port, str(svc.ca.path), cloud["cloud_id"], cloud["token"], upstreams, RELAY)
-    await ref.connect()
-    for _ in range(100):
-        if svc.registry.get(cloud["cloud_id"]):
-            break
-        await asyncio.sleep(0.01)
-    ref.cloud = cloud
-    yield ref
-    await ref.close()
+async def join(svc, api, key: str, hostname: str = "cloud") -> dict:
+    """A device joining the fake Headscale with a key, as `tailscale up` would."""
+    resp = await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/join", json={"key": key, "hostname": hostname})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["node"]
 
 
 async def visit(svc, name: str, *, ca_path=None, verify: bool = True):
-    """A visitor's TLS connection to `name` through the relay."""
+    """A raw TLS connection to `name` through the relay."""
     ctx = ssl.create_default_context(cafile=str(ca_path or svc.ca.path))
     if not verify:
         ctx.check_hostname = False

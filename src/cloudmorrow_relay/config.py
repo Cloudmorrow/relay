@@ -2,12 +2,14 @@
 
 Everything the relay needs to know about where it lives is here: the zone it
 answers for, the two names that are its own (the relay host, which carries
-the tunnels and the control API, and the login host, which is Headscale's
-address for the Tailscale apps), the addresses it listens on and publishes
-in DNS, and where its certificate and Headscale are.
+the control API, and the login host, which is Headscale's address for the
+Tailscale apps), the addresses it listens on and publishes in DNS, where its
+certificate and Headscale are, and where the admin secret comes from.
 
 The file is the operator's; the relay never writes it. What changes at run
 time (clouds, tokens, codes) lives in the SQLite file in `state_dir`.
+Secrets (the Cloudflare token, the admin secret) come from the environment
+or from files of their own, never from this file.
 """
 
 from __future__ import annotations
@@ -44,9 +46,8 @@ class Nameserver:
 @dataclass
 class Route:
     """A name that is not a cloud's but shares the machine: the website,
-    the shop. On 443 it is matched by SNI and passed through untouched,
-    exactly like a cloud's; on 80 by Host. The upstream (a local Caddy, say)
-    does its own TLS.
+    the shop. On 443 it is matched by SNI and passed through untouched; on
+    80 by Host. The upstream (a local Caddy, say) does its own TLS.
     """
 
     upstream: tuple[str, int]
@@ -59,8 +60,9 @@ class Route:
 
 @dataclass
 class Acme:
-    """Getting the relay's own certificate (relay host + login host) by
-    itself, with lego. Off when `client` is empty: then the files at
+    """Getting the relay's own certificate by itself, with lego: the
+    relay host, the login host and, with the DNS challenge, `*.<zone>` for
+    the landing pages. Off when `client` is empty: then the files at
     tls.cert/tls.key are somebody else's business, as before.
     """
 
@@ -76,14 +78,20 @@ class Acme:
 @dataclass
 class Limits:
     # A name is cheap to claim and a squatter is patient: a handful an hour
-    # from one address is plenty for anybody setting up a box.
+    # from one address is plenty for anybody setting up a box. (Only when
+    # open_claims is on; otherwise names come through the website.)
     enrol_per_hour: int = 5
-    # Pairing codes are made by a signed-in cloud, and tried by anybody who
-    # can reach the login page. Six characters from 31 is about 2^29.7, so
-    # the tries per address (and per phone waiting to be registered) are
-    # what keeps guessing hopeless within a code's ten minutes.
+    # Link codes asked for, per address. A box asks for one at install and
+    # again only if the person let it run out.
+    links_per_hour: int = 10
+    # Invite codes are made by a signed-in cloud, and tried by anybody who
+    # can reach the login page or the redeem call. Six characters from 31
+    # is about 2^29.7, so the tries per address (and per phone waiting to
+    # be registered, and per cloud name) are what keeps guessing hopeless
+    # within a code's ten minutes.
     pair_codes_per_hour: int = 20
     pair_attempts_per_10min: int = 10
+    redeems_per_name_10min: int = 30
     mesh_keys_per_hour: int = 30
     bad_auth_per_minute: int = 30
     # The peek at the first bytes of a connection, before we know where it
@@ -93,10 +101,6 @@ class Limits:
     handshake_timeout: float = 10.0
     max_pending_connections: int = 2048
     body_max_bytes: int = 16 * 1024
-    # cmtunnel/1 keepalive, seconds. The contract says 25 and 60; tests
-    # shorten them.
-    ping_after: float = 25.0
-    dead_after: float = 60.0
 
 
 RESERVED_NAMES = frozenset(
@@ -135,9 +139,6 @@ class Config:
     # Headscale has made its key.
     headscale_api_key_file: Path | None = None
     extra_records_path: Path | None = None
-    mesh_prefixes: list[str] = field(
-        default_factory=lambda: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
-    )
     nameservers: list[Nameserver] = field(default_factory=list)
     hostmaster: str | None = None
     dns_ttl: int = 60
@@ -155,6 +156,23 @@ class Config:
     dns_tag: str = "cloudmorrow-relay"
     routes: list[Route] = field(default_factory=list)
     acme: Acme = field(default_factory=Acme)
+    # Anybody may claim a name with `POST /v1/clouds`, as a self-hosted
+    # relay without a website wants. Off: names come only through linking,
+    # approved by the website over the admin API.
+    open_claims: bool = False
+    # The admin API's secret: read from this environment variable, or from
+    # the file. No secret, no admin API.
+    admin_secret_env: str = "RELAY_ADMIN_SECRET"
+    admin_secret_file: Path | None = None
+    # Where the box sends the person to enter a link code.
+    link_url: str = "https://cloudmorrow.com/link"
+    # What the landing page links to: the core's releases, and the client
+    # installer that /install.sh runs.
+    releases_url: str = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest"
+    installer_url: str = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest/download/install.sh"
+    # How often the relay reads the boxes' state from Headscale (the
+    # extra records, uptime), in seconds.
+    mesh_poll_seconds: float = 60.0
 
     # --- derived -------------------------------------------------------
 
@@ -177,6 +195,24 @@ class Config:
 
     def public_host(self, name: str) -> str:
         return f"{name}.{self.zone}"
+
+    def public_url(self, name: str) -> str:
+        return f"https://{self.public_host(name)}{self._port_suffix}"
+
+    def cloud_label(self, host: str | None) -> str | None:
+        """The cloud name in `<name>.<zone>`, or None for anything else
+        (another zone, a deeper name, one of the relay's own names).
+        """
+        if not host or not host.endswith("." + self.zone):
+            return None
+        if host in (self.relay_host, self.login_host):
+            return None
+        label = host[: -len(self.zone) - 1]
+        return None if "." in label or not label else label
+
+    def cloud_label_like(self, host: str) -> bool:
+        """Whether `host` is one label under the zone, as `*.<zone>` covers."""
+        return host.endswith("." + self.zone) and "." not in host[: -len(self.zone) - 1]
 
     def reserved(self) -> frozenset[str]:
         """Names a cloud may not have: the built-in list, the operator's
@@ -259,6 +295,8 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
     tls = data.get("tls", {})
     hs = data.get("headscale", {})
     dns = data.get("dns", {})
+    admin = data.get("admin", {})
+    landing = data.get("landing", {})
     try:
         limits = Limits(**data.get("limits", {}))
     except TypeError as exc:
@@ -291,9 +329,6 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
         headscale_api_key=hs.get("api_key"),
         headscale_api_key_file=path(hs.get("api_key_file")),
         extra_records_path=path(hs.get("extra_records_path")),
-        mesh_prefixes=list(
-            hs.get("mesh_prefixes", ["100.64.0.0/10", "fd7a:115c:a1e0::/48"])
-        ),
         nameservers=nameservers,
         hostmaster=dns.get("hostmaster"),
         dns_ttl=int(dns.get("ttl", 60)),
@@ -306,6 +341,13 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
         cloudflare_token_env=dns.get("cloudflare_token_env", "CLOUDFLARE_API_TOKEN"),
         dns_tag=dns.get("tag", "cloudmorrow-relay"),
         routes=_routes(data.get("routes", [])),
+        open_claims=bool(data.get("open_claims", False)),
+        admin_secret_env=admin.get("secret_env", "RELAY_ADMIN_SECRET"),
+        admin_secret_file=path(admin.get("secret_file")),
+        link_url=data.get("link_url", Config.link_url),
+        releases_url=landing.get("releases_url", Config.releases_url),
+        installer_url=landing.get("installer_url", Config.installer_url),
+        mesh_poll_seconds=float(hs.get("poll_seconds", 60.0)),
         acme=Acme(
             client=tls.get("acme", ""),
             challenge=tls.get("acme_challenge", "dns-cloudflare"),

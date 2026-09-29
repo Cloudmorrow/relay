@@ -1,30 +1,30 @@
 """The control API (`/v1`), as HOSTING.md lays it out.
 
-A box claims a name once and gets a token; after that every call is
+A box gets its token by linking (links.py): the website approves its link
+code, and the box collects the token once. After that every call is
 `Authorization: Bearer <token>` and acts on that cloud only (`/me`). The
 answers are JSON; errors are `{"detail": "<a plain sentence>"}` — the core
 shows them to people, so they read as sentences, not codes.
 
 Status codes, where the contract leaves them open: a create answers 201
-(`POST /v1/clouds`, `…/mesh/keys`, `…/mesh/pair`, `/v1/acme-dns/register`,
-as acme-dns itself does), a delete 204 with no body, everything else 200.
-401 for a missing or wrong token, 404 for what is not there, 409 for a name
-that is taken, 413 for a body over the cap, 422 for a request that does not
-make sense (a bad name, a reserved one, a malformed field), 429 when a
-limit is reached, 502 when Headscale did not answer, 503 when private
-access is not configured on this relay at all.
+(`/v1/links`, `…/mesh/keys`, `…/mesh/invites`, `/v1/invites/redeem`,
+`/v1/acme-dns/register`, as acme-dns itself does), a delete 204 with no
+body, everything else 200. 401 for a missing or wrong token, 404 for what
+is not there, 409 for a name that is taken, 410 for a link code that is
+gone, 413 for a body over the cap, 422 for a request that does not make
+sense (a bad name, a reserved one, a malformed field), 429 when a limit is
+reached, 502 when Headscale did not answer, 503 when the mesh is not
+configured on this relay at all.
 
-The same app serves the pairing pages for the login host (pairing.py) and,
-on port 80, the files certbot puts in the ACME webroot for the relay's own
-certificate.
+The same app serves the admin API for the website (admin.py), the pairing
+pages for the login host (pairing.py) and, on port 80, the files lego or
+certbot put in the ACME webroot for the relay's own certificate.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import re
-import unicodedata
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -33,45 +33,24 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import pairing
-from .headscale import HeadscaleError, device
-from .store import Cloud, NameTaken
+from . import admin, links, logos, pairing
+from .headscale import BOX_HOSTNAME, HeadscaleError, box_node, device
+from .names import name_problem, normalise_name
+from .store import Cloud, NameTaken, iso
 
 log = logging.getLogger("cloudmorrow_relay.control")
 
-NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$")
 ACME_TXT_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-LABEL_MAX = 64
 DRAIN_MAX = 1024 * 1024
-
-
-# --- names ---------------------------------------------------------------
-
-
-def normalise_name(value: str) -> str:
-    """What a person typed, as the name it would become: compatibility
-    forms folded (a full-width "Ｌ" is an "l"), outer space dropped, lower
-    case. Nothing else is changed; the rules below then accept or refuse.
-    """
-    return unicodedata.normalize("NFKC", value or "").strip().lower()
-
-
-def name_problem(name: str, reserved: frozenset[str]) -> str | None:
-    if not 3 <= len(name) <= 40:
-        return "A name is 3 to 40 characters long."
-    if not NAME_RE.match(name):
-        return "A name is made of a-z, 0-9 and hyphens, and starts and ends with a letter or digit."
-    if "--" in name:
-        return "A name cannot have two hyphens in a row."
-    if name in reserved:
-        return f"The name {name} is reserved."
-    return None
+INVITE_KEY_LIFETIME = 3600
 
 
 # --- request bodies ------------------------------------------------------
 
 
 class Strict(BaseModel):
+    # Unknown fields are ignored: an older box's `for` label on a key or
+    # an invite is dropped here, never stored.
     model_config = ConfigDict(extra="ignore")
 
 
@@ -79,19 +58,14 @@ class ClaimBody(Strict):
     name: str = Field(max_length=200)
 
 
-class PatchBody(Strict):
-    name: str | None = Field(default=None, max_length=200)
-    public: bool | None = None
-
-
 class KeyBody(Strict):
     ephemeral: bool = False
     expires_in: int = Field(default=3600, ge=60, le=30 * 24 * 3600)
-    for_: str = Field(default="", alias="for", max_length=LABEL_MAX)
 
 
-class PairBody(Strict):
-    for_: str = Field(default="", alias="for", max_length=LABEL_MAX)
+class RedeemBody(Strict):
+    name: str = Field(max_length=200)
+    code: str = Field(max_length=32)
 
 
 class AddressBody(Strict):
@@ -108,20 +82,23 @@ class AcmeUpdate(Strict):
 
 class BodyCap:
     """Refuse request bodies over a size, whether or not they say their
-    length up front. Pure ASGI, so it sits under everything.
+    length up front. Pure ASGI, so it sits under everything. A logo is the
+    one body allowed to be bigger (`big`, for paths ending in `/logo`).
     """
 
-    def __init__(self, app, limit: int):
+    def __init__(self, app, limit: int, big: int = 0):
         self.app = app
-        self.limit = limit
+        self.small = limit
+        self.big = max(big, limit)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        limit = self.big if scope.get("path", "").endswith("/logo") else self.small
         for name, value in scope.get("headers", []):
             if name == b"content-length":
                 try:
-                    too_big = int(value) > self.limit
+                    too_big = int(value) > limit
                 except ValueError:
                     too_big = True
                 if too_big:
@@ -135,7 +112,7 @@ class BodyCap:
             if message["type"] != "http.request":
                 return
             body += message.get("body", b"")
-            if len(body) > self.limit:
+            if len(body) > limit:
                 # Swallow a little more, so an honest client that is still
                 # sending sees the 413 rather than a reset connection.
                 drained = 0
@@ -212,43 +189,20 @@ def create_app(svc) -> FastAPI:
 
     def need_headscale():
         if svc.headscale is None:
-            raise HTTPException(503, "Private access is not set up on this relay.")
+            raise HTTPException(503, "The mesh is not set up on this relay.")
         return svc.headscale
 
-    def record(cloud: Cloud, devices: list | None = None) -> dict:
-        tunnel = svc.registry.get(cloud.id)
-        live_in = live_out = 0
-        if tunnel is not None:
-            done_in, done_out = svc.registry._flushed.get(id(tunnel), (0, 0))
-            live_in, live_out = tunnel.bytes_in - done_in, tunnel.bytes_out - done_out
-        out = {
-            "cloud_id": cloud.id,
-            "name": cloud.name,
-            "zone": cfg.zone,
-            "public_host": cfg.public_host(cloud.name),
-            "public": cloud.public,
-            "tunnel": {
-                "connected": tunnel is not None,
-                "connected_since": _iso(tunnel.connected_since) if tunnel else None,
-            },
-            "bytes_in": cloud.bytes_in + live_in,
-            "bytes_out": cloud.bytes_out + live_out,
-            "mesh_address": cloud.mesh_address,
-            "login_server": cfg.login_server,
-        }
-        if devices is not None:
-            out["devices"] = devices
-        return out
-
-    async def devices_of(cloud: Cloud) -> list[dict]:
-        nodes = await svc.headscale.list_nodes(cloud.mesh_user)
-        labels = store.labels(cloud.id)
-        return [device(n, labels) for n in nodes]
+    def unanswered() -> HTTPException:
+        return HTTPException(502, "The coordination server did not answer. Try again.")
 
     # --- clouds ------------------------------------------------------------
 
     @app.post("/v1/clouds", status_code=201)
     async def claim(body: ClaimBody, request: Request):
+        # Only on a relay that lets anybody take a name (a self-hosted one
+        # with no website); otherwise names come through linking.
+        if not cfg.open_claims:
+            raise HTTPException(403, "This relay gives out names through linking only. Ask for a link code.")
         if not svc.enrol.allow(svc.client_ip(request)):
             raise HTTPException(429, "Too many names claimed from this address. Try again later.")
         name = normalise_name(body.name)
@@ -256,71 +210,32 @@ def create_app(svc) -> FastAPI:
         if problem:
             raise HTTPException(422, problem)
         try:
-            cloud, token = store.create_cloud(name)
+            cloud, _ = store.create_cloud(name)
         except NameTaken:
             raise HTTPException(409, f"The name {name} is taken.") from None
         log.info("cloud %s claimed %s", cloud.id, name)
         # Clears anything a previous owner of the name left in DNS.
         await svc.dns_changed([name])
-        return {
-            "cloud_id": cloud.id,
-            "token": token,
-            "name": cloud.name,
-            "zone": cfg.zone,
-            "public_host": cfg.public_host(cloud.name),
-            "relay_host": cfg.relay_host,
-            "login_server": cfg.login_server,
-        }
+        return links.handover(svc, cloud)
 
     @app.get("/v1/clouds/me")
     async def me(cloud: Cloud = Depends(cloud_for)):
-        devices: list = []
-        if svc.headscale is not None:
-            try:
-                devices = await devices_of(cloud)
-            except HeadscaleError:
-                # The record is still worth having without the device list.
-                devices = []
-        return record(cloud, devices)
-
-    @app.patch("/v1/clouds/me")
-    async def patch(body: PatchBody, cloud: Cloud = Depends(cloud_for)):
-        if body.name is not None:
-            name = normalise_name(body.name)
-            if name != cloud.name:
-                problem = name_problem(name, cfg.reserved())
-                if problem:
-                    raise HTTPException(422, problem)
-                try:
-                    store.rename(cloud.id, name)
-                except NameTaken:
-                    raise HTTPException(409, f"The name {name} is taken.") from None
-                log.info("cloud %s renamed to %s", cloud.id, name)
-                tunnel = svc.registry.get(cloud.id)
-                if tunnel is not None:
-                    tunnel.name = name
-        if body.public is not None and body.public != cloud.public:
-            store.set_public(cloud.id, body.public)
-            if not body.public:
-                await svc.registry.drop(cloud.id)
-        svc.update_mesh_records()
-        await svc.dns_changed([cloud.name, store.cloud(cloud.id).name])
-        return record(store.cloud(cloud.id))
+        return {
+            "cloud_id": cloud.id,
+            "name": cloud.name,
+            "zone": cfg.zone,
+            "mesh_address": cloud.mesh_address,
+            "login_server": cfg.login_server,
+        }
 
     @app.delete("/v1/clouds/me", status_code=204)
     async def delete(cloud: Cloud = Depends(cloud_for)):
-        if svc.headscale is not None:
-            try:
-                await svc.headscale.delete_user(cloud.mesh_user)
-            except HeadscaleError:
-                # Keep the cloud rather than leave devices behind in a user
-                # nobody can reach any more.
-                raise HTTPException(502, "The coordination server did not answer. Try again.") from None
-        await svc.registry.drop(cloud.id)
-        store.delete_cloud(cloud.id)
-        svc.update_mesh_records()
-        await svc.dns_changed([cloud.name])
-        log.info("cloud %s gave its name back", cloud.id)
+        try:
+            await svc.unlink(cloud)
+        except HeadscaleError:
+            # Keep the cloud rather than leave devices behind in a user
+            # nobody can reach any more.
+            raise unanswered() from None
         return Response(status_code=204)
 
     # --- the mesh ----------------------------------------------------------
@@ -332,28 +247,58 @@ def create_app(svc) -> FastAPI:
         if not svc.mesh_keys.allow(cloud.id):
             raise HTTPException(429, "Too many keys this hour. Try again later.")
         try:
+            nodes = await hs.list_nodes(cloud.mesh_user)
             key = await hs.create_key(cloud.mesh_user, ephemeral=body.ephemeral, expires_in=body.expires_in)
         except HeadscaleError:
-            raise HTTPException(502, "The coordination server did not answer. Try again.") from None
-        store.set_label("key", str(key.get("id")), cloud.id, body.for_.strip())
-        return {"key": key["key"], "login_server": cfg.login_server, "expires_at": key.get("expiration")}
+            raise unanswered() from None
+        # The hostname a node joining with this key would be expected to
+        # take: the box's own, while the cloud has no box on the mesh.
+        hint = BOX_HOSTNAME if box_node(nodes, cloud.mesh_user) is None else None
+        return {
+            "key": key["key"],
+            "login_server": cfg.login_server,
+            "expires_at": key.get("expiration"),
+            "node_hint": hint,
+        }
 
-    @app.post("/v1/clouds/me/mesh/pair", status_code=201)
-    async def mesh_pair(body: PairBody | None = None, cloud: Cloud = Depends(cloud_for)):
-        body = body or PairBody()
+    async def invite(cloud: Cloud = Depends(cloud_for)):
         need_headscale()
         if not svc.pair_codes.allow(cloud.id):
-            raise HTTPException(429, "Too many pairing codes this hour. Try again later.")
-        code, expires = pairing.issue_code(store, cloud.id, body.for_.strip())
-        return {"code": code, "expires_at": _iso(expires), "login_server": cfg.login_server}
+            raise HTTPException(429, "Too many invites this hour. Try again later.")
+        code, expires = pairing.issue_code(store, cloud.id)
+        return {"code": code, "expires_at": iso(expires), "login_server": cfg.login_server}
+
+    app.post("/v1/clouds/me/mesh/invites", status_code=201)(invite)
+    # The name older boxes know it by.
+    app.post("/v1/clouds/me/mesh/pair", status_code=201, include_in_schema=False)(invite)
+
+    @app.post("/v1/invites/redeem", status_code=201)
+    async def redeem(body: RedeemBody, request: Request):
+        hs = need_headscale()
+        ip = svc.client_ip(request)
+        name = normalise_name(body.name)
+        if not svc.pair_attempts.allow(f"ip:{ip}") or not svc.redeems.allow(f"name:{name}"):
+            raise HTTPException(429, "Too many tries. Wait a few minutes, then ask for a new invite.")
+        cloud = store.cloud_by_name(name)
+        code = pairing.normalise_code(body.code)
+        claimed = store.claim_invite(code, cloud.id) if (cloud and code) else None
+        if claimed is None:
+            raise HTTPException(404, "That invite did not work. Invites work once, for ten minutes.")
+        try:
+            key = await hs.create_key(claimed.mesh_user, ephemeral=False, expires_in=INVITE_KEY_LIFETIME)
+        except HeadscaleError:
+            store.release_invite(code)
+            raise unanswered() from None
+        return {"key": key["key"], "login_server": cfg.login_server, "expires_at": key.get("expiration")}
 
     @app.get("/v1/clouds/me/mesh/devices")
     async def mesh_devices(cloud: Cloud = Depends(cloud_for)):
-        need_headscale()
+        hs = need_headscale()
         try:
-            return {"devices": await devices_of(cloud)}
+            nodes = await hs.list_nodes(cloud.mesh_user)
         except HeadscaleError:
-            raise HTTPException(502, "The coordination server did not answer. Try again.") from None
+            raise unanswered() from None
+        return {"devices": [device(n) for n in nodes]}
 
     @app.delete("/v1/clouds/me/mesh/devices/{node_id}", status_code=204)
     async def mesh_remove(node_id: str, cloud: Cloud = Depends(cloud_for)):
@@ -365,50 +310,22 @@ def create_app(svc) -> FastAPI:
                 raise HTTPException(404, "There is no such device in this cloud.")
             await hs.delete_node(node_id)
         except HeadscaleError:
-            raise HTTPException(502, "The coordination server did not answer. Try again.") from None
-        store.drop_label("node", node_id)
+            raise unanswered() from None
+        svc.meshwatch.poke()
         return Response(status_code=204)
 
-    @app.put("/v1/clouds/me/mesh/address")
-    async def mesh_address(body: AddressBody, cloud: Cloud = Depends(cloud_for)):
-        address = None
-        if body.address:
-            try:
-                ip = ipaddress.ip_address(body.address.strip())
-            except ValueError:
-                raise HTTPException(422, "address: that is not an IP address.") from None
-            # Only a mesh address: the name must not become a way to point
-            # a name in our zone at any machine on the internet.
-            if not any(ip in ipaddress.ip_network(p) for p in cfg.mesh_prefixes):
-                raise HTTPException(422, "address: that is not a mesh address.")
-            if svc.headscale is not None:
-                try:
-                    nodes = await svc.headscale.list_nodes(cloud.mesh_user)
-                except HeadscaleError:
-                    nodes = None
-                if nodes is not None and not any(str(ip) in n.get("ipAddresses", []) for n in nodes):
-                    raise HTTPException(422, "address: no device of this cloud has that address.")
-            address = str(ip)
-        store.set_mesh_address(cloud.id, address)
-        svc.update_mesh_records()
-        await svc.dns_changed([cloud.name])
-        return {"address": address}
+    @app.put("/v1/clouds/me/mesh/address", include_in_schema=False)
+    async def mesh_address(body: AddressBody | None = None, cloud: Cloud = Depends(cloud_for)):
+        # Older boxes report their mesh address here. The relay reads it
+        # from Headscale itself now; the call only makes it look sooner.
+        svc.meshwatch.poke()
+        return {"address": body.address if body else None}
 
     # --- acme-dns ------------------------------------------------------------
 
     @app.post("/v1/acme-dns/register", status_code=201)
     async def acme_register(cloud: Cloud = Depends(cloud_for)):
-        user, password, subdomain = store.acme_register(cloud.id)
-        return {
-            "username": user,
-            "password": password,
-            "subdomain": subdomain,
-            # The record is published at the name itself, so no CNAME is
-            # needed: fulldomain is where the TXT already lives.
-            "fulldomain": f"_acme-challenge.{cfg.public_host(cloud.name)}",
-            "allowfrom": [],
-            "server_url": f"{cfg.control_url}/v1/acme-dns",
-        }
+        return links.acme_dns(svc, cloud)
 
     @app.post("/v1/acme-dns/update")
     async def acme_update(
@@ -447,6 +364,8 @@ def create_app(svc) -> FastAPI:
             raise HTTPException(404, "There is nothing here.")
         return FileResponse(path, media_type="text/plain")
 
+    app.include_router(links.router(svc))
+    app.include_router(admin.router(svc))
     app.include_router(pairing.router(svc))
 
     @app.middleware("http")
@@ -465,10 +384,4 @@ def create_app(svc) -> FastAPI:
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
-    return BodyCap(app, cfg.limits.body_max_bytes)
-
-
-def _iso(ts: float) -> str:
-    import datetime as dt
-
-    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return BodyCap(app, cfg.limits.body_max_bytes, big=logos.MAX_BYTES + 1024)

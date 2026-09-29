@@ -1,7 +1,6 @@
 """The relay's own certificate, got and renewed by itself.
 
-One certificate for the relay host and the login host, from Let's Encrypt,
-by [lego](https://go-acme.github.io/lego/) — a maintained ACME client that
+One certificate for the relay's names, from Let's Encrypt, by [lego](https://go-acme.github.io/lego/) — a maintained ACME client that
 the image ships as one static binary. Writing an ACME client here would be
 more code to trust than calling one.
 
@@ -15,6 +14,14 @@ takes, so nothing is dropped.
 The challenge is DNS-01 through Cloudflare (the same token as the DNS
 backend, handed to lego as CLOUDFLARE_DNS_API_TOKEN), or HTTP-01 through
 the ACME webroot that port 80 serves for the relay's own names.
+
+With DNS-01 the certificate is the wildcard `*.<zone>`: it covers the
+landing pages at `<name>.<zone>` and, being one label deep, the relay host
+and the login host as well (Let's Encrypt refuses names a wildcard in the
+same order already covers, so they are listed only when they are deeper).
+HTTP-01 cannot get a wildcard: the relay and login hosts work, the landing
+pages do not. `--force-cert-domains` makes lego start again when the list
+of names changed, as it does for a relay that had no wildcard before.
 """
 
 from __future__ import annotations
@@ -30,6 +37,12 @@ from pathlib import Path
 log = logging.getLogger("cloudmorrow_relay.acme")
 
 
+def domains(cfg) -> list[str]:
+    if cfg.acme.challenge == "http":
+        return [cfg.relay_host, cfg.login_host]
+    return [f"*.{cfg.zone}"] + [h for h in (cfg.relay_host, cfg.login_host) if not cfg.cloud_label_like(h)]
+
+
 def lego_command(cfg) -> list[str]:
     acme = cfg.acme
     hook = " ".join([
@@ -41,8 +54,8 @@ def lego_command(cfg) -> list[str]:
         "--accept-tos",
         "--path", str(acme.path),
         "--server", acme.server,
-        "--domains", cfg.relay_host,
-        "--domains", cfg.login_host,
+        *[arg for name in domains(cfg) for arg in ("--domains", name)],
+        "--force-cert-domains",
         "--deploy-hook", hook,
     ]
     if acme.email:
