@@ -1,18 +1,25 @@
 # cloudmorrow-relay serve --config /etc/cloudmorrow-relay/relay.toml
 #
 # One machine with a public IPv4 (and IPv6 if it has one) runs all of it:
-# the relay on 443 and 80, the control API behind it, and the DNS for the
-# zone on 53. Relative paths are taken from this file's folder.
+# the relay on 443 and 80, the control API and the landing pages behind it,
+# and the DNS for the zone on 53. Relative paths are taken from this file's
+# folder.
 
 zone = "cloudmorrow.com"
-relay_host = "relay.cloudmorrow.com"   # the tunnel and the control API (access_control)
+relay_host = "relay.cloudmorrow.com"   # the control API (access_control)
 login_host = "mesh.cloudmorrow.com"    # Headscale's address for the Tailscale apps
 state_dir = "/var/lib/cloudmorrow-relay"
-# Names nobody may claim, besides the built-in list (config.py) and the
+# Names nobody may take, besides the built-in list (config.py) and the
 # names this file already uses.
 reserved = []
+# A relay with no website to link boxes through lets them claim a name
+# themselves (POST /v1/clouds). Off, names come only through linking.
+open_claims = true
+# Where a box sends its person to enter a link code (the website).
+# link_url = "https://cloudmorrow.com/link"
 
-# What DNS hands out for the relay's names and for every public cloud.
+# What DNS hands out for the relay's names and for every cloud's name (its
+# landing page).
 public_ipv4 = "203.0.113.10"
 public_ipv6 = "2001:db8::10"
 
@@ -26,9 +33,10 @@ http_port = 80
 dns_port = 53
 
 [tls]
-# The relay's own certificate, for relay_host and login_host (one
-# certificate with both names). Re-read on SIGHUP. Until it exists, port 80
-# serves the ACME webroot below so certbot can get it.
+# The relay's own certificate: relay_host, login_host and *.<zone> for the
+# landing pages (with a DNS challenge the wildcard alone covers all three).
+# Re-read on SIGHUP. Until it exists, port 80 serves the ACME webroot below
+# so certbot can get the first two; a wildcard needs a DNS challenge.
 cert = "/etc/cloudmorrow-relay/tls/fullchain.pem"
 key = "/etc/cloudmorrow-relay/tls/privkey.pem"
 acme_webroot = "/var/lib/cloudmorrow-relay/acme"
@@ -39,11 +47,22 @@ acme_webroot = "/var/lib/cloudmorrow-relay/acme"
 url = "http://127.0.0.1:8080"
 api_key_file = "/etc/cloudmorrow-relay/headscale-api-key"
 # The file Headscale reads its extra DNS records from (dns.extra_records_path
-# in its config); the relay rewrites it.
+# in its config); the relay rewrites it with <name>.<zone> -> each box.
 extra_records_path = "/var/lib/headscale-dns/extra-records.json"
-# The prefixes Headscale hands out (its `prefixes`); a box can only report
-# a mesh address inside them.
-mesh_prefixes = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+# How often the relay reads the boxes' addresses and online state.
+poll_seconds = 60
+
+[admin]
+# The admin API (/admin/v1), for a website that links boxes to accounts.
+# Its secret comes from this environment variable or from a file; with
+# neither, the admin API is off.
+secret_env = "RELAY_ADMIN_SECRET"
+# secret_file = "/etc/cloudmorrow-relay/admin-secret"
+
+[landing]
+# What the landing pages link to.
+# releases_url = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest"
+# installer_url = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest/download/install.sh"
 
 [dns]
 # "builtin": this server answers for the zone (below). "cloudflare": the zone
@@ -83,6 +102,7 @@ value = "cloudmorrow.com."
 
 [limits]
 enrol_per_hour = 5
+links_per_hour = 10
 pair_codes_per_hour = 20
 pair_attempts_per_10min = 10
 mesh_keys_per_hour = 30

@@ -14,7 +14,7 @@ services:
     # Host networking: the relay owns 80 and 443 and sees visitors' real
     # addresses; it reaches Headscale and the website on loopback.
     network_mode: host
-    env_file: /srv/cloudmorrow-relay/secrets.env      # CLOUDFLARE_API_TOKEN=…
+    env_file: /srv/cloudmorrow-relay/secrets.env      # CLOUDFLARE_API_TOKEN=…, RELAY_ADMIN_SECRET=…
     volumes:
       - ./relay.toml:/etc/cloudmorrow-relay/relay.toml:ro
       - /srv/cloudmorrow-relay/headscale-api-key:/etc/cloudmorrow-relay/headscale-api-key:ro

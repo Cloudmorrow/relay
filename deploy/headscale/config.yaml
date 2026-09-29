@@ -79,8 +79,9 @@ dns:
       - 2606:4700:4700::1111
       - 2620:fe::fe
   search_domains: []
-  # The relay writes <name>.<zone> → a box's mesh address here, so enrolled
-  # devices reach their box directly.
+  # The relay writes <name>.<zone> → each box's mesh addresses (A and AAAA)
+  # here, read from this Headscale once a minute, so devices on the mesh
+  # reach their box directly. Headscale watches the file.
   extra_records_path: /var/lib/headscale-dns/extra-records.json
 
 unix_socket: /var/run/headscale/headscale.sock

@@ -1,6 +1,10 @@
 # The relay on the Hetzner box: cloudmorrow.tech, DNS at Cloudflare, the
 # website on the same machine behind it. Mounted read-only at
 # /etc/cloudmorrow-relay/relay.toml by docker-compose.yml in this folder.
+#
+# Names come only through linking (open_claims is off): the website
+# approves link codes over the admin API, with $RELAY_ADMIN_SECRET from
+# /srv/cloudmorrow-relay/secrets.env.
 
 zone = "cloudmorrow.tech"
 relay_host = "relay.cloudmorrow.tech"   # access_control = "https://relay.cloudmorrow.tech"
@@ -17,14 +21,15 @@ http_port = 80
 [dns]
 # The zone is at Cloudflare with *.cloudmorrow.tech and cloudmorrow.tech
 # A 178.105.27.139, DNS only. The relay writes just the _acme-challenge
-# TXT records and private clouds' mesh addresses, tagged "cloudmorrow-relay".
+# TXT records (and the name beside one), tagged "cloudmorrow-relay".
 # Token: $CLOUDFLARE_API_TOKEN from /srv/cloudmorrow-relay/secrets.env.
 backend = "cloudflare"
 
 [tls]
-# relay. and mesh.cloudmorrow.tech from Let's Encrypt by DNS-01 through the
-# same Cloudflare token; renewed by itself, re-read without a restart.
-# Kept in state_dir/tls, lego's own files in state_dir/lego.
+# *.cloudmorrow.tech from Let's Encrypt by DNS-01 through the same
+# Cloudflare token: relay., mesh. and every cloud's landing page. Renewed by
+# itself, re-read without a restart. Kept in state_dir/tls, lego's own
+# files in state_dir/lego.
 acme = "lego"
 acme_challenge = "dns-cloudflare"
 
@@ -35,7 +40,8 @@ extra_records_path = "/var/lib/headscale-dns/extra-records.json"
 
 # The website (cloudmorrow.com, proxied by Cloudflare) and later the shop,
 # served by the `website` service on this machine. 443 goes through as it
-# came (the website does its own TLS); 80 by Host.
+# came (the website does its own TLS); 80 by Host. The website calls the
+# admin API at https://relay.cloudmorrow.tech/admin/v1.
 [[routes]]
 sni = ["cloudmorrow.com", "www.cloudmorrow.com"]
 upstream = "127.0.0.1:8443"
