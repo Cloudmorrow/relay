@@ -64,6 +64,7 @@ def lego_command(cfg) -> list[str]:
         cmd += ["--http", "--http.webroot", str(cfg.acme_webroot)]
     else:
         cmd += ["--dns", "cloudflare"]
+        cmd += [arg for r in acme.resolvers for arg in ("--dns.resolvers", r)]
     return cmd
 
 

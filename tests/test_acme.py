@@ -96,3 +96,16 @@ def test_install_cert_needs_lego(tmp_path, monkeypatch):
     monkeypatch.delenv("LEGO_HOOK_CERT_PATH", raising=False)
     with pytest.raises(SystemExit):
         main(["install-cert", "--cert", str(tmp_path / "c"), "--key", str(tmp_path / "k")])
+
+
+def test_the_dns_challenge_is_checked_with_public_resolvers(tmp_path):
+    """Not the box's own stub resolver, which serves stale challenge records."""
+    from cloudmorrow_relay.config import from_dict
+
+    cfg = from_dict({"zone": "a.test", "state_dir": str(tmp_path), "tls": {"acme": "lego"}})
+    cmd = lego_command(cfg)
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--dns.resolvers"] == ["1.1.1.1:53", "8.8.8.8:53"]
+    cfg = from_dict({"zone": "a.test", "state_dir": str(tmp_path), "tls": {"acme": "lego", "acme_resolvers": ["9.9.9.9:53"]}})
+    assert [a for a in lego_command(cfg) if a.endswith(":53")] == ["9.9.9.9:53"]
+    http = from_dict({"zone": "a.test", "state_dir": str(tmp_path), "tls": {"acme": "lego", "acme_challenge": "http"}})
+    assert "--dns.resolvers" not in lego_command(http)

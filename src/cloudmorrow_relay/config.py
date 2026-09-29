@@ -73,6 +73,10 @@ class Acme:
     lego: str = "lego"
     path: Path | None = None  # lego's own storage; default state_dir/lego
     renew_hours: float = 12.0
+    # Where lego checks that its challenge record is out there. Not the
+    # machine's own resolver: a stub like systemd-resolved caches the old
+    # _acme-challenge answers and lego waits on them until it gives up.
+    resolvers: tuple[str, ...] = ("1.1.1.1:53", "8.8.8.8:53")
 
 
 @dataclass
@@ -356,6 +360,7 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
             lego=tls.get("lego", "lego"),
             path=path(tls.get("lego_path")),
             renew_hours=float(tls.get("renew_hours", 12.0)),
+            resolvers=tuple(tls.get("acme_resolvers", Acme.resolvers)),
         ),
     )
     if cfg.dns_backend not in ("builtin", "cloudflare"):
