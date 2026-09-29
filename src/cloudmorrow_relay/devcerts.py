@@ -57,6 +57,7 @@ class DevCA:
             .not_valid_before(now - dt.timedelta(minutes=5))
             .not_valid_after(now + dt.timedelta(days=30))
             .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(self.key.public_key()), critical=False)
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=True, key_cert_sign=True, crl_sign=True,
@@ -90,6 +91,11 @@ class DevCA:
             .add_extension(x509.SubjectAlternativeName(sans), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            # Python 3.13 verifies strictly (VERIFY_X509_STRICT), which
+            # wants the issuer's key identified.
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self.key.public_key()), critical=False
+            )
             .sign(self.key, hashes.SHA256())
         )
         cert_path = self.folder / f"{stem}.pem"
