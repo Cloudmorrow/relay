@@ -218,7 +218,8 @@ def router(svc) -> APIRouter:
         cloud = owned(cloud_id, account)
         try:
             await svc.unlink(cloud)
-        except HeadscaleError:
+        except HeadscaleError as exc:
+            log.warning("Headscale failed while unlinking %s: %s (status %s)", cloud.id, exc, exc.status)
             raise HTTPException(502, "The coordination server did not answer. Try again.") from None
         return Response(status_code=204)
 

@@ -192,7 +192,9 @@ def create_app(svc) -> FastAPI:
             raise HTTPException(503, "The mesh is not set up on this relay.")
         return svc.headscale
 
-    def unanswered() -> HTTPException:
+    def unanswered(exc: HeadscaleError, what: str) -> HTTPException:
+        # The box only hears a plain sentence; the reason stays here, for whoever runs the relay.
+        log.warning("Headscale failed while %s: %s (status %s)", what, exc, exc.status)
         return HTTPException(502, "The coordination server did not answer. Try again.")
 
     # --- clouds ------------------------------------------------------------
@@ -232,10 +234,10 @@ def create_app(svc) -> FastAPI:
     async def delete(cloud: Cloud = Depends(cloud_for)):
         try:
             await svc.unlink(cloud)
-        except HeadscaleError:
+        except HeadscaleError as exc:
             # Keep the cloud rather than leave devices behind in a user
             # nobody can reach any more.
-            raise unanswered() from None
+            raise unanswered(exc, "delete") from None
         return Response(status_code=204)
 
     # --- the mesh ----------------------------------------------------------
@@ -249,8 +251,8 @@ def create_app(svc) -> FastAPI:
         try:
             nodes = await hs.list_nodes(cloud.mesh_user)
             key = await hs.create_key(cloud.mesh_user, ephemeral=body.ephemeral, expires_in=body.expires_in)
-        except HeadscaleError:
-            raise unanswered() from None
+        except HeadscaleError as exc:
+            raise unanswered(exc, "mesh key") from None
         # The hostname a node joining with this key would be expected to
         # take: the box's own, while the cloud has no box on the mesh.
         hint = BOX_HOSTNAME if box_node(nodes, cloud.mesh_user) is None else None
@@ -286,9 +288,9 @@ def create_app(svc) -> FastAPI:
             raise HTTPException(404, "That invite did not work. Invites work once, for ten minutes.")
         try:
             key = await hs.create_key(claimed.mesh_user, ephemeral=False, expires_in=INVITE_KEY_LIFETIME)
-        except HeadscaleError:
+        except HeadscaleError as exc:
             store.release_invite(code)
-            raise unanswered() from None
+            raise unanswered(exc, "redeem") from None
         return {"key": key["key"], "login_server": cfg.login_server, "expires_at": key.get("expiration")}
 
     @app.get("/v1/clouds/me/mesh/devices")
@@ -296,8 +298,8 @@ def create_app(svc) -> FastAPI:
         hs = need_headscale()
         try:
             nodes = await hs.list_nodes(cloud.mesh_user)
-        except HeadscaleError:
-            raise unanswered() from None
+        except HeadscaleError as exc:
+            raise unanswered(exc, "mesh devices") from None
         return {"devices": [device(n) for n in nodes]}
 
     @app.delete("/v1/clouds/me/mesh/devices/{node_id}", status_code=204)
@@ -309,8 +311,8 @@ def create_app(svc) -> FastAPI:
             if not any(str(n["id"]) == node_id for n in nodes):
                 raise HTTPException(404, "There is no such device in this cloud.")
             await hs.delete_node(node_id)
-        except HeadscaleError:
-            raise unanswered() from None
+        except HeadscaleError as exc:
+            raise unanswered(exc, "mesh remove") from None
         svc.meshwatch.poke()
         return Response(status_code=204)
 

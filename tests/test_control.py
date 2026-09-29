@@ -385,3 +385,17 @@ async def test_mesh_not_configured(tmp_path, ca, enrol, api, svc):
         assert resp.json()["detail"] == "The mesh is not set up on this relay."
     finally:
         svc.headscale = saved
+
+
+
+async def test_a_headscale_failure_is_logged_with_its_reason(api, enrol, svc, caplog):
+    """The box hears a plain sentence; whoever runs the relay needs the cause."""
+    import logging
+
+    cloud = await enrol()
+    svc.fake.api_key = "rotated"  # Headscale now refuses us
+    caplog.set_level(logging.WARNING, logger="cloudmorrow_relay.control")
+    resp = await api.post("/v1/clouds/me/mesh/keys", headers=auth(cloud["token"]))
+    assert resp.status_code == 502 and "did not answer" in resp.json()["detail"]
+    record = next(r for r in caplog.records if "Headscale failed while mesh key" in r.getMessage())
+    assert "status 401" in record.getMessage()
