@@ -185,3 +185,50 @@ async def test_extra_records_are_taken(headscale):
     await asyncio.sleep(0.5)
     assert json.loads(headscale.extra.read_text())[0]["value"] == "100.64.0.5"
     assert await headscale.find_user("nobody") is None  # still answering
+
+
+async def test_the_relay_reaches_boxes_on_8443_and_nothing_reaches_it(headscale):
+    """The shipped policy, with Headscale's own `tests` block run against
+    it: two clouds with a box and a laptop each, and the relay's node,
+    tagged tag:relay the way the operator does it.
+    """
+
+    async def node(user: str, name: str) -> dict:
+        auth_id = "hskey-authreq-" + secrets.token_urlsafe(18)
+        await headscale._call("POST", "/debug/node", json={"user": user, "key": auth_id, "name": name})
+        return await headscale.register_node(user, auth_id)
+
+    for user in ("cloud-aaaaaaaaaaaaaaaa", "cloud-bbbbbbbbbbbbbbbb", "relay-joins-as"):
+        await headscale.ensure_user(user)
+    box_a = await node("cloud-aaaaaaaaaaaaaaaa", "cloud")
+    laptop_a = await node("cloud-aaaaaaaaaaaaaaaa", "laptop")
+    box_b = await node("cloud-bbbbbbbbbbbbbbbb", "cloud")
+    relay = await node("relay-joins-as", "relay")
+    cli = [headscale.binary, "-c", headscale.config]
+    subprocess.run(cli + ["nodes", "tag", "-i", str(relay["id"]), "-t", "tag:relay"], check=True, capture_output=True, timeout=30)
+    tagged = next(n for n in await headscale.all_nodes() if str(n["id"]) == str(relay["id"]))
+    assert tagged["tags"] == ["tag:relay"]
+
+    def ip(n: dict) -> str:
+        return n["ipAddresses"][0]
+
+    tests = [
+        {"src": "tag:relay",
+         "accept": [f"{ip(box_a)}:8443", f"{ip(box_b)}:8443", "cloud-aaaaaaaaaaaaaaaa@:8443"],
+         "deny": [f"{ip(box_a)}:443", f"{ip(box_a)}:22", f"{ip(box_b)}:8787", "tag:relay:8443"]},
+        {"src": "cloud-aaaaaaaaaaaaaaaa@",
+         "deny": ["tag:relay:8443", "tag:relay:443", f"{ip(relay)}:22", f"{ip(box_b)}:8443", f"{ip(box_b)}:443"]},
+        {"src": "cloud-bbbbbbbbbbbbbbbb@", "deny": ["tag:relay:8443", f"{ip(box_a)}:8443", f"{ip(laptop_a)}:22"]},
+    ]
+    text = POLICY.read_text().rstrip()
+    assert text.endswith("}")
+    policy = Path(headscale.config).parent / "policy-with-tests.hujson"
+    policy.write_text(text[:-1] + ', "tests": ' + json.dumps(tests) + "}\n")
+    out = subprocess.run(cli + ["policy", "check", "-f", str(policy)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stdout + out.stderr
+
+    # And the check is a real one: a test the policy fails, fails.
+    tests.append({"src": "cloud-aaaaaaaaaaaaaaaa@", "accept": [f"{ip(box_b)}:8443"]})
+    policy.write_text(text[:-1] + ', "tests": ' + json.dumps(tests) + "}\n")
+    out = subprocess.run(cli + ["policy", "check", "-f", str(policy)], capture_output=True, text=True, timeout=30)
+    assert out.returncode != 0 and "failed" in (out.stdout + out.stderr)

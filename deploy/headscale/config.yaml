@@ -59,7 +59,9 @@ log:
   level: info
   format: text
 
-# Each cloud's devices reach each other and nothing else.
+# Each cloud's devices reach each other and nothing else; the relay's own
+# node (tag:relay) reaches port 8443 of the boxes, and nothing reaches it.
+# Needs Headscale 0.28 or newer.
 policy:
   mode: file
   path: /etc/headscale/policy.hujson

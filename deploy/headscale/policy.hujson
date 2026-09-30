@@ -2,12 +2,45 @@
 // nothing else: autogroup:self is "devices of the same user". Without this
 // file Headscale allows everything, and every cloud's devices could reach
 // every other cloud's box.
+//
+// The one exception is the relay's own node, tagged tag:relay, which passes
+// visitors from anywhere through to port 8443 of a cloud's box (Caddy's
+// site for them, which takes a PROXY protocol header from the relay's mesh
+// addresses only). It may open connections to that port and no other, and
+// no rule lets anything open a connection to it.
+//
+// Needs Headscale 0.28 or newer: autogroup:self and autogroup:member came
+// in 0.27, and tags as an identity of their own (a tagged node belongs to
+// no user, so it is neither a member nor anybody's "self") in 0.28.
 {
+  // Nobody may put tag:relay on a node by asking for it (--advertise-tags):
+  // it comes only from a pre-auth key the operator makes with
+  // `headscale preauthkeys create --tags tag:relay`, or from
+  // `headscale nodes tag`, both of which are the admin's and skip this list.
+  "tagOwners": {
+    "tag:relay": []
+  },
   "acls": [
     {
       "action": "accept",
       "src": ["autogroup:member"],
       "dst": ["autogroup:self:*"]
+    },
+    // The box is the node named "cloud" in each cloud's user, and a policy
+    // cannot pick nodes by name. The choices were:
+    //   - one destination per cloud user ("cloud-<id>@:8443"): exact, but
+    //     the relay would rewrite the policy on every link and unlink;
+    //   - tagging the boxes: a tagged node leaves its user, which takes the
+    //     box out of autogroup:self and out of its own cloud;
+    //   - autogroup:member:8443, every user-owned node: what is here.
+    // So the relay's node may reach 8443 on a cloud's laptops and phones
+    // too, where nothing listens. It dials only the box's address, and it
+    // holds Headscale's API key, so it could already make a key for any
+    // cloud's user: this gives it nothing it did not have.
+    {
+      "action": "accept",
+      "src": ["tag:relay"],
+      "dst": ["autogroup:member:8443"]
     }
   ]
 }
