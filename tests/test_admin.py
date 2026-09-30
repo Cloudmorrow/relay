@@ -252,3 +252,33 @@ async def test_unlink(admin, link_box, api, svc):
     assert not svc.fake.nodes and not svc.fake.users
     assert (await admin.get(f"/admin/v1/accounts/{ACCOUNT}/clouds")).json() == []
     assert (await admin.get("/admin/v1/names/larsens")).json()["available"] is True
+
+
+async def test_invite(admin, link_box, api, svc):
+    one = await link_box("larsens", ACCOUNT)
+    url = f"/admin/v1/clouds/{one['cloud_id']}/invites"
+    # Another account's cloud is not there at all.
+    assert (await admin.post(url, json={"account": OTHER})).status_code == 404
+    assert (await admin.post(url, json={})).status_code == 422
+    resp = await admin.post(url, json={"account": ACCOUNT})
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert set(body) == {"code", "expires_at", "login_server"}
+    # It is an invite like the box's: a computer trades it for a key, once.
+    redeemed = await api.post("/v1/invites/redeem", json={"name": "larsens", "code": body["code"]})
+    assert redeemed.status_code == 201, redeemed.text
+    again = await api.post("/v1/invites/redeem", json={"name": "larsens", "code": body["code"]})
+    assert again.status_code == 404
+
+
+@pytest.fixture
+def few_invites(limits):
+    limits["pair_codes_per_hour"] = 2
+
+
+async def test_invites_share_the_boxs_allowance(few_invites, admin, link_box, api):
+    one = await link_box("larsens", ACCOUNT)
+    assert (await api.post("/v1/clouds/me/mesh/invites", headers=auth(one["token"]))).status_code == 201
+    url = f"/admin/v1/clouds/{one['cloud_id']}/invites"
+    assert (await admin.post(url, json={"account": ACCOUNT})).status_code == 201
+    assert (await admin.post(url, json={"account": ACCOUNT})).status_code == 429

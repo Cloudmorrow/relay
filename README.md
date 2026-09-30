@@ -384,6 +384,10 @@ not exist.
   handlers, `foreignObject`, a DOCTYPE or entities, or links to anything
   outside itself is refused, not cleaned. `GET` answers it whether or not
   the landing page shows it.
+- `POST clouds/{id}/invites {account}` → 201 `{code, expires_at,
+  login_server}`: an invite, the same as one the box makes, for an owner
+  with no device on the mesh yet to make one from. It counts against the
+  cloud's invites per hour (429), and is 503 without Headscale.
 - `DELETE clouds/{id}?account=…` → 204: unlink.
 
 **The landing page.** `/`: the display name if `show_name` and one is set,
