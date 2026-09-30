@@ -13,6 +13,16 @@ state_dir = "/var/lib/cloudmorrow-relay"   # /srv/cloudmorrow-relay/state on the
 public_ipv4 = "178.105.27.139"
 reserved = []
 
+# Visitors to a cloud's name are passed through to its box over the mesh.
+# The host is on the mesh as tag:relay (tailscaled in kernel mode; see the
+# README, "Putting the relay on the mesh"), and the relay, with host
+# networking, dials the boxes' 100.64.x.x addresses directly.
+mesh_dial = "direct"
+# The host's own mesh addresses, handed to every box: the only addresses
+# its Caddy takes a PROXY protocol header from. Empty: read from Headscale,
+# the nodes tagged tag:relay (only the operator can tag one).
+relay_addresses = []
+
 [listen]
 addresses = ["0.0.0.0", "::"]
 https_port = 443
@@ -27,7 +37,7 @@ backend = "cloudflare"
 
 [tls]
 # *.cloudmorrow.tech from Let's Encrypt by DNS-01 through the same
-# Cloudflare token: relay., mesh. and every cloud's landing page. Renewed by
+# Cloudflare token: relay., mesh. and every cloud's offline page. Renewed by
 # itself, re-read without a restart. Kept in state_dir/tls, lego's own
 # files in state_dir/lego.
 acme = "lego"

@@ -1,7 +1,7 @@
 # cloudmorrow-relay serve --config /etc/cloudmorrow-relay/relay.toml
 #
 # One machine with a public IPv4 (and IPv6 if it has one) runs all of it:
-# the relay on 443 and 80, the control API and the landing pages behind it,
+# the relay on 443 and 80, the control API and the offline pages behind it,
 # and the DNS for the zone on 53. Relative paths are taken from this file's
 # folder.
 
@@ -17,11 +17,22 @@ reserved = []
 open_claims = true
 # Where a box sends its person to enter a link code (the website).
 # link_url = "https://cloudmorrow.com/link"
-# Where an owner makes an invite from, named on the landing page.
+# My Clouds on the website, which the offline page points an owner to.
 # clouds_url = "https://cloudmorrow.com/clouds"
 
-# What DNS hands out for the relay's names and for every cloud's name (its
-# landing page).
+# Visitors to a cloud's name are passed through, unread, to port 8443 of
+# its box over the mesh. The relay's host is a node on the mesh, tagged
+# tag:relay (see the README). "direct": tailscaled runs in kernel mode on
+# the host and the relay uses host networking. Or a userspace tailscaled's
+# SOCKS5 proxy: mesh_dial = "socks5://127.0.0.1:1055".
+mesh_dial = "direct"
+# The relay node's own mesh addresses (`tailscale ip`). Boxes take a PROXY
+# protocol header from these only. Left out, they are read from Headscale:
+# the addresses of the nodes tagged tag:relay.
+# relay_addresses = ["100.64.0.1", "fd7a:115c:a1e0::1"]
+
+# What DNS hands out for the relay's names and for every cloud's name (the
+# relay passes those on to the boxes).
 public_ipv4 = "203.0.113.10"
 public_ipv6 = "2001:db8::10"
 
@@ -36,7 +47,7 @@ dns_port = 53
 
 [tls]
 # The relay's own certificate: relay_host, login_host and *.<zone> for the
-# landing pages (with a DNS challenge the wildcard alone covers all three).
+# offline pages (with a DNS challenge the wildcard alone covers all three).
 # Re-read on SIGHUP. Until it exists, port 80 serves the ACME webroot below
 # so certbot can get the first two; a wildcard needs a DNS challenge.
 cert = "/etc/cloudmorrow-relay/tls/fullchain.pem"
@@ -62,9 +73,8 @@ secret_env = "RELAY_ADMIN_SECRET"
 # secret_file = "/etc/cloudmorrow-relay/admin-secret"
 
 [landing]
-# What the landing pages link to.
+# What the offline pages link to.
 # releases_url = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest"
-# installer_url = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest/download/install.sh"
 
 [dns]
 # "builtin": this server answers for the zone (below). "cloudflare": the zone

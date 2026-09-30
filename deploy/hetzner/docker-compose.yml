@@ -12,7 +12,8 @@ services:
     image: cloudmorrow-relay
     restart: unless-stopped
     # Host networking: the relay owns 80 and 443 and sees visitors' real
-    # addresses; it reaches Headscale and the website on loopback.
+    # addresses; it reaches Headscale and the website on loopback, and the
+    # clouds' boxes over the host's own tailscaled (tag:relay, tailscale0).
     network_mode: host
     env_file: /srv/cloudmorrow-relay/secrets.env      # CLOUDFLARE_API_TOKEN=…, RELAY_ADMIN_SECRET=…
     volumes:
