@@ -28,6 +28,9 @@ cloudmorrow-relay = "cloudmorrow_relay.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+cloudmorrow_relay = ["assets/*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

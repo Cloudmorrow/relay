@@ -390,7 +390,10 @@ not exist.
   cloud's invites per hour (429), and is 503 without Headscale.
 - `DELETE clouds/{id}?account=…` → 204: unlink.
 
-**The landing page.** `/`: the display name if `show_name` and one is set,
+**The landing page.** It looks like cloudmorrow.com (its colours, fonts
+and hedgehog), with everything served from the relay: the fonts and
+pictures at `/_cm/<file>` (`src/cloudmorrow_relay/assets/`, the fonts under
+the SIL OFL beside them), nothing from anywhere else. `/`: the display name if `show_name` and one is set,
 else *A Cloudmorrow cloud*; the logo if `show_logo` and one is set, as `<img
 src="/logo">`; the client downloads (`[landing] releases_url`); `curl
 -fsSL https://<name>.<zone>/install.sh | sh`; a QR code of the login

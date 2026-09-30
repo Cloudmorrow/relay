@@ -16,8 +16,9 @@ one page:
 
 A name nobody has linked answers "There is no cloud here."
 
-The page is plain HTML with no script, no external assets and a strict
-content security policy; every value in it is escaped. A logo is served
+The page looks like cloudmorrow.com and is plain HTML with no script, no
+external assets (its fonts and hedgehog are served from `/_cm/`) and a
+strict content security policy; every value in it is escaped. A logo is served
 from `/logo` with a policy of its own that forbids everything (SVG
 included: an SVG opened on its own could otherwise run script), and the
 page only ever shows it as an `<img>`, where no script runs anyway.
@@ -26,6 +27,8 @@ page only ever shows it as an `<img>`, where no script runs anyway.
 from __future__ import annotations
 
 import html
+from functools import cache
+from pathlib import Path
 
 import segno
 from fastapi import FastAPI, Request
@@ -33,7 +36,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 PAGE_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+        "default-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'unsafe-inline'; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
@@ -49,64 +52,132 @@ LOGO_HEADERS = {
     "Content-Disposition": "inline",
 }
 
-# A small pixel cloud, drawn in rectangles; the page's only picture of its
-# own. As a data: URL it is also the tab's icon.
-CLOUD_PIXELS = [
-    (5, 0, 4, 1), (4, 1, 6, 1), (11, 1, 3, 1), (2, 2, 13, 1), (1, 3, 15, 1), (0, 4, 16, 2), (1, 6, 14, 1),
-]
+# The website's look (cloudmorrow.com, brand/tokens.css and site.css in
+# cloudmorrow-web), with its fonts and hedgehog served from here: the page
+# loads nothing from anywhere else. assets/ holds the latin subsets of
+# Barlow, Barlow Semi Condensed and JetBrains Mono (SIL OFL, the OFL-*.txt
+# beside them) and Morrow, the hedgehog, from the brand's assets.
+ASSETS = Path(__file__).parent / "assets"
+ASSET_TYPES = {".woff2": "font/woff2", ".png": "image/png", ".txt": "text/plain; charset=utf-8"}
+ASSET_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "public, max-age=604800",
+    "Access-Control-Allow-Origin": "*",
+}
+ASSET_PREFIX = "/_cm/"
 
 
-def pixel_cloud(fill: str = "currentColor", size: int = 42) -> str:
-    rects = "".join(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>' for x, y, w, h in CLOUD_PIXELS)
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 7" width="{size}" height="{size * 7 // 16}" '
-        f'fill="{fill}" shape-rendering="crispEdges" aria-hidden="true">{rects}</svg>'
+@cache
+def asset(name: str) -> bytes | None:
+    """One of the page's own files, by its bare name; None for anything else."""
+    if "/" in name or name.startswith(".") or Path(name).suffix not in ASSET_TYPES:
+        return None
+    path = ASSETS / name
+    return path.read_bytes() if path.is_file() else None
+
+
+# The website's 8x8 pixel icons, drawn as its dots are.
+ICONS = {
+    "screens": ["XXXXXXXX", "X......X", "X......X", "X......X", "XXXXXXXX", "...XX...", "..XXXX..", "........"],
+    "phone": ["..XXXX..", ".X....X.", ".X....X.", ".X....X.", ".X....X.", ".X....X.", ".X.XX.X.", "..XXXX.."],
+}
+
+
+def px(name: str) -> str:
+    dots = "".join(
+        f'<rect x="{x + 0.08:g}" y="{y + 0.08:g}" width=".84" height=".84" rx=".14"/>'
+        for y, row in enumerate(ICONS[name]) for x, cell in enumerate(row) if cell == "X"
     )
+    return f'<svg class="px-icon" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">{dots}</svg>'
 
-
-def _favicon() -> str:
-    from urllib.parse import quote
-
-    return "data:image/svg+xml," + quote(pixel_cloud("#5b6cff", 32))
-
-
-FAVICON = _favicon()
 
 STYLE = """
-:root{--bg:#f4f1ea;--card:#fffdf8;--ink:#1d1b16;--soft:#5d584c;--accent:#5b6cff;--accent2:#ff7a59;--code:#ece7db}
-@media (prefers-color-scheme: dark){:root{--bg:#131219;--card:#1c1b24;--ink:#ecebf3;--soft:#a5a2b3;--accent:#8c98ff;--accent2:#ff9a7e;--code:#262431}}
+@font-face{font-family:"Barlow";font-weight:400;font-display:swap;src:url(/_cm/barlow-400.woff2) format("woff2")}
+@font-face{font-family:"Barlow";font-weight:600;font-display:swap;src:url(/_cm/barlow-600.woff2) format("woff2")}
+@font-face{font-family:"Barlow Semi Condensed";font-weight:600;font-display:swap;src:url(/_cm/barlow-semi-condensed-600.woff2) format("woff2")}
+@font-face{font-family:"Barlow Semi Condensed";font-weight:700;font-display:swap;src:url(/_cm/barlow-semi-condensed-700.woff2) format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-weight:400 600;font-display:swap;src:url(/_cm/jetbrains-mono.woff2) format("woff2")}
+:root{
+ --cm-night:#0b0d12;--cm-ink:#14171f;--cm-surface:#1f242e;--cm-line:#333a48;--cm-line-bright:#4a5364;
+ --cm-text:#dfe5f0;--cm-muted:#99a1b3;--cm-deep:#0a3f75;--cm-cloud:#1c70b1;--cm-sky:#5aa6e0;
+ --cm-spine:#845b28;--cm-lens:#e0a84c;
+ --bg:var(--cm-ink);--surface:var(--cm-surface);--line:var(--cm-line);--text:var(--cm-text);
+ --text-muted:var(--cm-muted);--link:var(--cm-sky);
+ --font-display:"Barlow Semi Condensed","Barlow","Arial Narrow",sans-serif;
+ --font-body:"Barlow",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+ --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+ color-scheme:dark}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6f9;--surface:#fff;--line:#d5dbe5;--text:var(--cm-ink);
+ --text-muted:#5a6275;--link:#1a5e9c;color-scheme:light}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:40rem;margin:0 auto;padding:3rem 1rem 4rem}
-.card{background:var(--card);border:3px solid var(--ink);box-shadow:6px 6px 0 var(--ink);padding:1.5rem 1.5rem 1.25rem;margin-bottom:1.75rem}
-.band{height:6px;margin:-1.5rem -1.5rem 1.25rem;background:linear-gradient(90deg,var(--accent),var(--accent2))}
-header{display:flex;gap:1rem;align-items:center}
-header .mark{color:var(--accent);flex:none}
-header img{width:64px;height:64px;object-fit:contain;flex:none;image-rendering:auto}
-h1{font:700 1.6rem/1.2 ui-monospace,"SF Mono",Menlo,Consolas,monospace;margin:0;letter-spacing:-.01em;overflow-wrap:anywhere}
-.host{margin:.2rem 0 0;color:var(--soft);font:600 .95rem ui-monospace,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.lead{font-size:1.1rem;margin:1.25rem 0 0}
-h2{font:700 .85rem ui-monospace,Menlo,Consolas,monospace;text-transform:uppercase;letter-spacing:.12em;margin:0 0 .6rem;color:var(--accent)}
-h2::before{content:"";display:inline-block;width:.6em;height:.6em;background:var(--accent2);margin-right:.5em;vertical-align:.05em}
-pre{background:var(--code);border:2px solid var(--ink);padding:.7rem .8rem;overflow-x:auto;font:.9rem/1.4 ui-monospace,Menlo,Consolas,monospace;margin:.6rem 0}
-a{color:var(--accent);font-weight:600}
-.button{display:inline-block;text-decoration:none;color:var(--card);background:var(--ink);padding:.45rem .9rem;border:2px solid var(--ink);box-shadow:3px 3px 0 var(--accent)}
-.phone{display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap}
-.phone>div:last-child{flex:1 1 14rem;min-width:0}
-.phone p{overflow-wrap:anywhere}
-.qr{background:#fff;padding:6px;border:3px solid var(--ink);line-height:0;flex:none}
-.qr svg{width:148px;height:148px}
-small,.soft{color:var(--soft)}
-footer{text-align:center;font:.8rem ui-monospace,Menlo,Consolas,monospace;color:var(--soft)}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:400 1.0625rem/1.6 var(--font-body);-webkit-font-smoothing:antialiased}
+h1,h2{margin:0;font-family:var(--font-display);font-weight:600;line-height:1.1;text-wrap:balance}
+p{margin:0}
+a{color:var(--link);text-underline-offset:3px}
+code{font-family:var(--font-mono)}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:max(16px,4vw)}
+.top{background:var(--cm-night);border-bottom:1px solid var(--cm-line);color-scheme:dark}
+.top .wrap{display:flex;align-items:center;min-height:64px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:#ececec}
+.brand img{width:32px;height:32px}
+.brand span{font:700 1.25rem/1 var(--font-display);letter-spacing:.035em}
+.hero{background:radial-gradient(45% 60% at 80% 50%,color-mix(in srgb,var(--cm-cloud) 22%,transparent),transparent 70%),var(--cm-night);
+ color:var(--cm-text);color-scheme:dark;border-bottom:1px solid var(--cm-line)}
+.hero .wrap{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;align-items:center;padding-block:56px}
+.label{font:600 .8125rem/1.3 var(--font-display);letter-spacing:.14em;text-transform:uppercase;color:var(--cm-muted)}
+.hero h1{font-size:clamp(2.4rem,6vw,3.5rem);line-height:1;margin-top:12px;overflow-wrap:anywhere}
+.host{margin-top:10px;font:400 .95rem/1.4 var(--font-mono);color:var(--cm-sky);overflow-wrap:anywhere}
+.lead{margin-top:24px;font-size:1.3125rem;line-height:1.5;max-width:30em}
+.fine{margin-top:12px;color:var(--cm-muted)}
+.hero a{color:var(--cm-sky)}
+.hero figure{margin:0;width:176px;height:176px;display:grid;place-items:center}
+.hero figure img{max-width:100%;max-height:100%;object-fit:contain}
+.ways{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;padding-block:48px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px;display:grid;gap:14px;align-content:start;min-width:0}
+.card h2{display:flex;align-items:center;gap:10px;font-size:1.625rem}
+.card h2 .px-icon{width:20px;height:20px;color:var(--link)}
+.muted{color:var(--text-muted)}
+.btn{justify-self:start;display:inline-flex;align-items:center;min-height:44px;padding:0 20px;border-radius:10px;
+ font:600 1rem/1 var(--font-display);letter-spacing:.04em;text-decoration:none;
+ background:var(--cm-lens);color:var(--cm-ink);box-shadow:inset 0 -3px 0 color-mix(in srgb,var(--cm-spine) 55%,transparent)}
+.btn:hover{filter:brightness(1.07)}
+.cmd{background:var(--cm-night);border:1px solid var(--cm-line);border-radius:10px;color:var(--cm-text);color-scheme:dark;
+ padding:14px 16px;font:400 .84rem/1.55 var(--font-mono);overflow-wrap:anywhere}
+.cmd .p{color:var(--cm-lens);user-select:none}
+.phone{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.phone>div:last-child{flex:1 1 12rem;min-width:0;display:grid;gap:10px}
+.phone b{font:400 .8rem var(--font-mono);overflow-wrap:anywhere}
+.qr{background:#fff;padding:6px;border-radius:10px;line-height:0;flex:none}
+.qr svg{width:128px;height:128px}
+.foot{border-top:1px solid var(--line);padding-block:32px;color:var(--text-muted);font-size:.93rem}
+.foot .wrap{display:flex;align-items:center;gap:14px}
+.foot img{width:40px;height:40px;flex:none}
+.foot a{color:var(--text-muted)}
+@media (max-width:720px){
+ .hero .wrap{grid-template-columns:1fr;padding-block:40px}
+ .hero figure{grid-row:1;width:112px;height:112px}
+ .ways{grid-template-columns:1fr;padding-block:32px}}
 """
 
 
-def _document(title: str, body: str) -> str:
+def _document(title: str, hero: str, rest: str = "") -> str:
     return (
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        f"<title>{html.escape(title)}</title><link rel=\"icon\" href=\"{FAVICON}\">"
-        f"<style>{STYLE}</style></head><body><main>{body}</main></body></html>"
+        f"<title>{html.escape(title)}</title>"
+        "<link rel=\"icon\" href=\"/_cm/morrow-head-32.png\" type=\"image/png\">"
+        "<meta name=\"theme-color\" content=\"#0b0d12\">"
+        f"<style>{STYLE}</style></head><body>"
+        "<header class=\"top\"><div class=\"wrap\"><a class=\"brand\" href=\"https://cloudmorrow.com/\">"
+        "<img src=\"/_cm/morrow-32.png\" srcset=\"/_cm/morrow-32.png 1x, /_cm/morrow-64.png 2x\" alt=\"\">"
+        "<span>CLOUDMORROW</span></a></div></header>"
+        f"<section class=\"hero\"><div class=\"wrap\">{hero}</div></section>{rest}"
+        "<footer class=\"foot\"><div class=\"wrap\">"
+        "<img src=\"/_cm/morrow-64.png\" srcset=\"/_cm/morrow-64.png 1x, /_cm/morrow-128.png 2x\" alt=\"\">"
+        "<p>Cloudmorrow is free software under the GNU AGPL v3. Your data is yours, and so is the code. "
+        "<a href=\"https://cloudmorrow.com/\">cloudmorrow.com</a></p></div></footer>"
+        "</body></html>"
     )
 
 
@@ -115,57 +186,67 @@ def qr_svg(text: str) -> str:
     theme: scanners want it that way round.
     """
     code = segno.make(text, error="m")
-    return code.svg_inline(scale=4, border=2, dark="#1d1b16", light="#ffffff", title=text)
+    return code.svg_inline(scale=4, border=2, dark="#14171f", light="#ffffff", title=text)
+
+
+MORROW = (
+    '<img src="/_cm/morrow-128.png" srcset="/_cm/morrow-128.png 1x, /_cm/morrow-256.png 2x" '
+    'width="176" height="176" alt="">'
+)
 
 
 def landing_html(cfg, cloud, has_logo: bool) -> str:
     host = cfg.public_host(cloud.name)
     url = cfg.public_url(cloud.name)
-    title = cloud.display_name if (cloud.show_name and cloud.display_name) else "A Cloudmorrow cloud"
-    mark = (
-        '<img src="/logo" alt="">' if (cloud.show_logo and has_logo)
-        else f'<span class="mark">{pixel_cloud(size=56)}</span>'
-    )
+    named = bool(cloud.show_name and cloud.display_name)
+    title = cloud.display_name if named else "A Cloudmorrow cloud"
+    mark = '<img src="/logo" alt="">' if (cloud.show_logo and has_logo) else MORROW
     e = html.escape
-    body = f"""
-<section class="card">
- <div class="band"></div>
- <header>{mark}<div><h1>{e(title)}</h1><p class="host">{e(host)}</p></div></header>
+    hero = f"""
+<div>
+ {'<p class="label">A Cloudmorrow cloud</p>' if named else ''}
+ <h1>{e(title)}</h1>
+ <p class="host">{e(host)}</p>
  <p class="lead">This cloud's web app opens on its devices. Ask someone on it for an invite.</p>
- <p class="soft">Yours? Make one in <a href="{e(cfg.clouds_url)}">My Clouds</a>.</p>
+ <p class="fine">Yours? Make one in <a href="{e(cfg.clouds_url)}">My Clouds</a>.</p>
+</div>
+<figure>{mark}</figure>
+"""
+    rest = f"""
+<main class="wrap ways">
+<section class="card">
+ <h2>{px("screens")}On a computer</h2>
+ <p class="muted">Get the Cloudmorrow client, then use your invite to join.</p>
+ <a class="btn" href="{e(cfg.releases_url)}">Download the client</a>
+ <p class="muted">Or in a terminal (macOS, Linux):</p>
+ <div class="cmd"><span class="p">$ </span>curl -fsSL {e(url)}/install.sh | sh</div>
 </section>
 <section class="card">
- <h2>On a computer</h2>
- <p>Get the Cloudmorrow client, then use your invite to join.</p>
- <p><a class="button" href="{e(cfg.releases_url)}">Download the client</a></p>
- <p class="soft">Or in a terminal (macOS, Linux):</p>
- <pre>curl -fsSL {e(url)}/install.sh | sh</pre>
-</section>
-<section class="card">
- <h2>On a phone</h2>
+ <h2>{px("phone")}On a phone</h2>
  <div class="phone">
   <div class="qr">{qr_svg(cfg.login_server)}</div>
   <div>
-   <p>Install the Tailscale app, choose a custom login server, and scan this
-   or type <b>{e(cfg.login_server)}</b>.</p>
-   <p class="soft">The app then opens a page that asks for your invite.</p>
+   <p class="muted">Install the Tailscale app, choose a custom login server, and scan this or type</p>
+   <b>{e(cfg.login_server)}</b>
+   <p class="muted">The app then opens a page that asks for your invite.</p>
   </div>
  </div>
 </section>
-<footer>{pixel_cloud(size=21)}<br>Cloudmorrow</footer>
+</main>
 """
-    return _document(title, body)
+    return _document(title, hero, rest)
 
 
 def nobody_html() -> str:
-    body = f"""
-<section class="card">
- <div class="band"></div>
- <header><span class="mark">{pixel_cloud(size=56)}</span><div><h1>There is no cloud here.</h1></div></header>
- <p class="lead soft">Nobody has linked a cloud to this name.</p>
-</section>
+    hero = f"""
+<div>
+ <h1>There is no cloud here.</h1>
+ <p class="lead">Nobody has linked a cloud to this name.</p>
+ <p class="fine"><a href="https://cloudmorrow.com/">What is Cloudmorrow?</a></p>
+</div>
+<figure>{MORROW}</figure>
 """
-    return _document("There is no cloud here.", body)
+    return _document("There is no cloud here.", hero)
 
 
 def install_sh(cfg, cloud) -> str:
@@ -198,6 +279,13 @@ def create_app(svc) -> FastAPI:
         if cloud is None:
             return PlainTextResponse("There is no cloud here.\n", 404, headers=PAGE_HEADERS)
         return PlainTextResponse(install_sh(cfg, cloud), headers=PAGE_HEADERS)
+
+    @app.get(ASSET_PREFIX + "{name}", include_in_schema=False)
+    async def page_asset(name: str):
+        data = asset(name)
+        if data is None:
+            return Response(status_code=404, headers=LOGO_HEADERS)
+        return Response(data, media_type=ASSET_TYPES[Path(name).suffix], headers=ASSET_HEADERS)
 
     @app.get("/logo", include_in_schema=False)
     async def logo(request: Request):

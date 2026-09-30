@@ -50,6 +50,24 @@ async def test_the_page(visitor, link_box, svc):
     assert resp.headers["x-robots-tag"] == "noindex"
 
 
+async def test_the_fonts_and_hedgehog_are_served_here(visitor, link_box):
+    await link_box("larsens", ACCOUNT)
+    browser = visitor("larsens")
+    page = (await browser.get("/")).text
+    for name in ("barlow-400.woff2", "barlow-semi-condensed-600.woff2", "jetbrains-mono.woff2", "morrow-128.png"):
+        assert f"/_cm/{name}" in page
+        resp = await browser.get(f"/_cm/{name}")
+        assert resp.status_code == 200 and len(resp.content) > 1000, name
+        assert resp.headers["x-content-type-options"] == "nosniff"
+    assert (await browser.get("/_cm/barlow-400.woff2")).headers["content-type"] == "font/woff2"
+    assert (await browser.get("/_cm/OFL-Barlow.txt")).status_code == 200
+    for bad in ("/_cm/nothing.png", "/_cm/..%2Flanding.py", "/_cm/landing.py", "/_cm/.hidden.png"):
+        assert (await browser.get(bad)).status_code == 404, bad
+    # Anything but a page file is still the landing page's 404.
+    assert (await browser.get("/_cm/a/b.png")).status_code == 404
+    assert "font-src 'self'" in (await browser.get("/")).headers["content-security-policy"]
+
+
 async def test_the_certificate_is_the_wildcard(link_box, svc):
     await link_box("larsens", ACCOUNT)
     reader, writer = await visit(svc, f"larsens.{ZONE}")  # verifies the name
@@ -65,7 +83,7 @@ async def test_display_name_and_logo_when_turned_on(visitor, link_box, admin, sv
     browser = visitor("larsens")
     page = (await browser.get("/")).text
     # Not turned on yet: neither shows.
-    assert "Larsens" not in page.split("<main>")[1].split("</h1>")[0]
+    assert "Larsens" not in page.split("<h1>")[1].split("</h1>")[0]
     assert '<img src="/logo"' not in page
     assert (await browser.get("/logo")).status_code == 404
 
