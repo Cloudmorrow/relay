@@ -170,6 +170,8 @@ class Config:
     admin_secret_file: Path | None = None
     # Where the box sends the person to enter a link code.
     link_url: str = "https://cloudmorrow.com/link"
+    # Where the owner makes an invite without a device on the mesh (My Clouds).
+    clouds_url: str = "https://cloudmorrow.com/clouds"
     # What the landing page links to: the core's releases, and the client
     # installer that /install.sh runs.
     releases_url: str = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest"
@@ -349,6 +351,7 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
         admin_secret_env=admin.get("secret_env", "RELAY_ADMIN_SECRET"),
         admin_secret_file=path(admin.get("secret_file")),
         link_url=data.get("link_url", Config.link_url),
+        clouds_url=data.get("clouds_url", Config.clouds_url),
         releases_url=landing.get("releases_url", Config.releases_url),
         installer_url=landing.get("installer_url", Config.installer_url),
         mesh_poll_seconds=float(hs.get("poll_seconds", 60.0)),

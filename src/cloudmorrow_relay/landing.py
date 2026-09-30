@@ -132,6 +132,7 @@ def landing_html(cfg, cloud, has_logo: bool) -> str:
  <div class="band"></div>
  <header>{mark}<div><h1>{e(title)}</h1><p class="host">{e(host)}</p></div></header>
  <p class="lead">This cloud's web app opens on its devices. Ask someone on it for an invite.</p>
+ <p class="soft">Yours? Make one in <a href="{e(cfg.clouds_url)}">My Clouds</a>.</p>
 </section>
 <section class="card">
  <h2>On a computer</h2>

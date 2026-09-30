@@ -37,6 +37,7 @@ async def test_the_page(visitor, link_box, svc):
     assert "<h1>A Cloudmorrow cloud</h1>" in page
     assert f"larsens.{ZONE}" in page
     assert "This cloud's web app opens on its devices. Ask someone on it for an invite." in page
+    assert 'Yours? Make one in <a href="https://cloudmorrow.com/clouds">My Clouds</a>.' in page
     assert 'href="https://github.com/Cloudmorrow/cloudmorrow/releases/latest"' in page
     assert f"curl -fsSL https://larsens.{ZONE}:{svc.cfg.https_port}/install.sh | sh" in page or \
         f"curl -fsSL {svc.cfg.public_url('larsens')}/install.sh | sh" in page

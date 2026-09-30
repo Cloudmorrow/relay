@@ -394,8 +394,9 @@ not exist.
 else *A Cloudmorrow cloud*; the logo if `show_logo` and one is set, as `<img
 src="/logo">`; the client downloads (`[landing] releases_url`); `curl
 -fsSL https://<name>.<zone>/install.sh | sh`; a QR code of the login
-server; and *This cloud's web app opens on its devices. Ask someone on it
-for an invite.* Any other path shows the same page with 404 (a link into
+server; *This cloud's web app opens on its devices. Ask someone on it
+for an invite.*; and, for the owner, a link to My Clouds (`clouds_url`),
+where the website makes one. Any other path shows the same page with 404 (a link into
 the web app, opened off the mesh). `/install.sh` downloads
 `[landing] installer_url` and runs it with `--server https://<name>.<zone>
 --invite`, passing on its own arguments (`sh -s -- <code>`). A name with no

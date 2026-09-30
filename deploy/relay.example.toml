@@ -17,6 +17,8 @@ reserved = []
 open_claims = true
 # Where a box sends its person to enter a link code (the website).
 # link_url = "https://cloudmorrow.com/link"
+# Where an owner makes an invite from, named on the landing page.
+# clouds_url = "https://cloudmorrow.com/clouds"
 
 # What DNS hands out for the relay's names and for every cloud's name (its
 # landing page).
