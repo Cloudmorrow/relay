@@ -127,9 +127,13 @@ async def test_an_accounts_clouds(admin, link_box, svc, api):
     entry = clouds[0]
     assert set(entry) == {
         "cloud_id", "name", "created", "online", "online_since", "state_since", "uptime_30d",
-        "show_name", "show_logo", "display_name", "has_logo",
+        "public", "show_name", "show_logo", "display_name", "has_logo",
     }
     assert entry["cloud_id"] == one["cloud_id"] and entry["name"] == "larsens"
+    assert entry["public"] is True
+    # The box decides whether it is reachable from anywhere; the website sees it.
+    await api.patch("/v1/clouds/me", json={"public": False}, headers={"Authorization": f"Bearer {one['token']}"})
+    assert (await admin.get(f"/admin/v1/accounts/{ACCOUNT}/clouds")).json()[0]["public"] is False
     assert entry["created"].endswith("Z")
     assert (entry["online"], entry["online_since"], entry["uptime_30d"]) == (False, None, None)
     assert (await admin.get("/admin/v1/accounts/acct_nobody/clouds")).json() == []

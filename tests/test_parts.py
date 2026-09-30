@@ -50,6 +50,11 @@ def test_config_errors():
         from_dict({"zone": "a.test", "public_ipv4": "::1"})
     with pytest.raises(ConfigError):
         from_dict({"zone": "a.test", "tls": {"cert": "x.pem"}})
+    for dial in ("tailscale", "socks5://", "socks5://127.0.0.1", "socks5://:1055", "http://127.0.0.1:1055"):
+        with pytest.raises(ConfigError):
+            from_dict({"zone": "a.test", "mesh_dial": dial})
+    with pytest.raises(ConfigError):
+        from_dict({"zone": "a.test", "relay_addresses": ["relay.a.test"]})
 
 
 def test_rate_limiter():
@@ -104,7 +109,7 @@ def test_extra_records_file(tmp_path):
 def test_dev_command(tmp_path):
     """`cloudmorrow-relay dev` starts, prints where to point the core, and
     links a box against its own CA the way the website would, then shows
-    the cloud's landing page.
+    the cloud's offline page (no box is on its fake mesh).
     """
     base = random.randint(20, 50) * 1000 + random.randint(0, 400)
     proc = subprocess.Popen(
@@ -151,7 +156,8 @@ def test_dev_command(tmp_path):
             # In dev mode a name can also be claimed at once.
             assert client.post(f"{relay}/v1/clouds", json={"name": "hansens"}).status_code == 201
             page = client.get(f"https://larsens.cm.localhost:{base + 443}/")
-            assert page.status_code == 200 and "A Cloudmorrow cloud" in page.text
+            # No box on a fake mesh: the offline page.
+            assert page.status_code == 503 and "A Cloudmorrow cloud" in page.text
     finally:
         proc.send_signal(signal.SIGINT)
         try:
@@ -165,12 +171,18 @@ def test_new_settings(tmp_path):
     cfg = from_dict({
         "zone": "a.test", "open_claims": True, "link_url": "https://example.com/link",
         "admin": {"secret_env": "X_SECRET", "secret_file": "secret.txt"},
-        "landing": {"releases_url": "https://example.com/r", "installer_url": "https://example.com/i.sh"},
+        "landing": {"releases_url": "https://example.com/r"},
         "headscale": {"poll_seconds": 5},
+        "mesh_dial": "socks5://127.0.0.1:1055", "relay_addresses": ["100.64.0.9", "fd7a:115c:a1e0:0::9"],
     }, base=tmp_path)
     assert cfg.open_claims and cfg.link_url == "https://example.com/link"
     assert cfg.admin_secret_env == "X_SECRET" and cfg.admin_secret_file == tmp_path / "secret.txt"
-    assert (cfg.releases_url, cfg.installer_url) == ("https://example.com/r", "https://example.com/i.sh")
+    assert cfg.releases_url == "https://example.com/r"
+    assert cfg.mesh_socks5 == ("127.0.0.1", 1055) and cfg.box_port == 8443
+    assert cfg.relay_addresses == ["100.64.0.9", "fd7a:115c:a1e0::9"]
+    plain = from_dict({"zone": "a.test"})
+    assert (plain.mesh_dial, plain.mesh_socks5, plain.relay_addresses) == ("direct", None, [])
+    assert plain.limits.box_connect_timeout == 3.0
     assert cfg.mesh_poll_seconds == 5
     assert cfg.cloud_label("larsens.a.test") == "larsens"
     for host in ("relay.a.test", "mesh.a.test", "a.larsens.a.test", "a.test", "larsens.b.test", None):
@@ -202,11 +214,64 @@ def test_an_old_database_is_brought_up_to_date(tmp_path):
     cloud = store.cloud("c1")
     assert cloud.name == "larsens" and cloud.account is None and cloud.show_name is False
     columns = {r["name"] for r in store._all("PRAGMA table_info(clouds)")}
-    assert not {"public", "bytes_in", "bytes_out"} & columns
+    assert not {"bytes_in", "bytes_out"} & columns
+    # The tunnel's switch is pass-through's switch: it stays, as it was.
+    assert cloud.public is True
     tables = {r["name"] for r in store._all("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "labels" not in tables and "pair_codes" not in tables and "links" in tables
+    store.set_public("c1", False)
     store.close()
-    Store(tmp_path / "relay.sqlite").close()  # and again, with nothing left to do
+    again = Store(tmp_path / "relay.sqlite")  # and again, with nothing left to do
+    assert again.cloud("c1").public is False
+    again.close()
+
+
+def test_a_database_from_before_pass_through_gets_public(tmp_path):
+    """The last release before pass-through had no `public`: every
+    cloud gets it, on, and keeps what the box sets it to across restarts.
+    """
+    import sqlite3
+
+    from cloudmorrow_relay.store import Store
+
+    db = sqlite3.connect(tmp_path / "relay.sqlite")
+    db.executescript("""
+        CREATE TABLE clouds (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL UNIQUE,
+            account TEXT, mesh_address TEXT, mesh_address6 TEXT, acme_user TEXT UNIQUE, acme_key_hash TEXT,
+            acme_subdomain TEXT UNIQUE, display_name TEXT, show_name INTEGER NOT NULL DEFAULT 0,
+            show_logo INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL);
+        INSERT INTO clouds (id, name, token_hash, created_at) VALUES ('c1', 'larsens', 'h', 1.0);
+        INSERT INTO clouds (id, name, token_hash, created_at) VALUES ('c2', 'hansens', 'i', 1.0);
+    """)
+    db.commit()
+    db.close()
+    store = Store(tmp_path / "relay.sqlite")
+    assert [c.public for c in store.all_clouds()] == [True, True]
+    store.set_public("c1", False)
+    store.close()
+    store = Store(tmp_path / "relay.sqlite")
+    assert (store.cloud("c1").public, store.cloud("c2").public) == (False, True)
+    store.close()
+
+
+def test_proxy_v2_header():
+    from cloudmorrow_relay.meshdial import PROXY_V2_SIGNATURE, proxy_v2_header
+
+    v4 = proxy_v2_header(("198.51.100.7", 50123), ("178.105.27.139", 443))
+    assert v4 == (
+        PROXY_V2_SIGNATURE + b"\x21\x11\x00\x0c"
+        + bytes([198, 51, 100, 7]) + bytes([178, 105, 27, 139]) + (50123).to_bytes(2, "big") + (443).to_bytes(2, "big")
+    )
+    assert len(PROXY_V2_SIGNATURE) == 12
+    v6 = proxy_v2_header(("2001:db8::7", 40000, 0, 0), ("2001:db8::1", 443, 0, 0))
+    assert v6[12:16] == b"\x21\x21\x00\x24" and len(v6) == 16 + 36
+    assert v6[16:32] == bytes.fromhex("20010db8000000000000000000000007")
+    # An IPv4 visitor on a dual-stack socket is written as IPv4.
+    mapped = proxy_v2_header(("::ffff:198.51.100.7", 50123, 0, 0), ("::ffff:178.105.27.139", 443, 0, 0))
+    assert mapped == v4
+    # What it cannot say, it does not guess: LOCAL, no addresses.
+    for src, dst in ((None, None), (("198.51.100.7", 1), ("2001:db8::1", 443)), (("?", 1), ("1.2.3.4", 2))):
+        assert proxy_v2_header(src, dst) == PROXY_V2_SIGNATURE + b"\x20\x00\x00\x00"
 
 
 def test_hetzner_config_loads():
@@ -218,3 +283,17 @@ def test_hetzner_config_loads():
     assert [r.upstream for r in cfg.routes] == [("127.0.0.1", 8443), ("127.0.0.1", 8080)]
     assert cfg.routes[0].sni == ["cloudmorrow.com", "www.cloudmorrow.com"]
     assert cfg.login_server == "https://mesh.cloudmorrow.tech"
+    assert cfg.mesh_dial == "direct" and cfg.box_port == 8443
+
+
+def test_the_policy_lets_the_relay_reach_boxes_only():
+    """The shipped policy, read as Headscale reads it (HuJSON: comments
+    and trailing commas allowed).
+    """
+    import re
+
+    text = (ROOT / "deploy" / "headscale" / "policy.hujson").read_text()
+    policy = json.loads(re.sub(r",(\s*[}\]])", r"\1", re.sub(r"^\s*//.*$", "", text, flags=re.M)))
+    assert policy["tagOwners"] == {"tag:relay": []}
+    rules = [(r["src"], r["dst"]) for r in policy["acls"]]
+    assert rules == [(["autogroup:member"], ["autogroup:self:*"]), (["tag:relay"], ["autogroup:member:8443"])]

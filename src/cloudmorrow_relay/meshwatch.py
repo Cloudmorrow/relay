@@ -9,7 +9,10 @@ named `cloud` in the cloud's user. From that it keeps two things:
   extra-records file: `<name>.<zone>` A and AAAA → the box, so devices on
   the mesh go straight to it;
 - whether the box is online, as a list of changes per cloud, from which
-  the website's "online since" and "uptime over 30 days" are worked out.
+  the website's "online since" and "uptime over 30 days" are worked out;
+- the relay's own mesh addresses, those of the nodes tagged `tag:relay`,
+  unless the config lists them (`relay_addresses`). Only the operator can
+  put that tag on a node (the policy gives it no owners).
 
 Nothing here asks the box anything: Headscale knows all of it already.
 When Headscale does not answer, nothing is changed (the box is not marked
@@ -28,6 +31,7 @@ from .store import iso
 log = logging.getLogger("cloudmorrow_relay.meshwatch")
 
 WINDOW = 30 * 24 * 3600
+RELAY_TAG = "tag:relay"
 
 
 def extra_records(cfg, clouds) -> list[dict]:
@@ -40,6 +44,15 @@ def extra_records(cfg, clouds) -> list[dict]:
         if cloud.mesh_address6:
             records.append({"name": host, "type": "AAAA", "value": cloud.mesh_address6})
     return sorted(records, key=lambda r: (r["name"], r["type"]))
+
+
+def relay_addresses(nodes: list[dict]) -> list[str]:
+    """The mesh addresses of the relay's own nodes, in a stable order."""
+    found = []
+    for node in nodes:
+        if RELAY_TAG in (node.get("tags") or []):
+            found += [a for a in addresses(node) if a]
+    return sorted(set(found), key=lambda a: (":" in a, a))
 
 
 def uptime(changes: list[tuple[float, bool]], now: float, since: float, window: float = WINDOW) -> float | None:
@@ -86,6 +99,14 @@ class MeshWatch:
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._written: list[dict] | None = None
+        self._relay_addresses: list[str] | None = None  # None: not looked yet
+
+    @property
+    def relay_addresses(self) -> list[str]:
+        """The addresses boxes take a PROXY header from: the config's, or
+        else what Headscale last said the relay's nodes have.
+        """
+        return list(self.svc.cfg.relay_addresses) or list(self._relay_addresses or [])
 
     def poke(self) -> None:
         """Look again now rather than at the next minute."""
@@ -128,6 +149,13 @@ class MeshWatch:
             if (v4, v6) != (cloud.mesh_address, cloud.mesh_address6):
                 store.set_mesh_addresses(cloud.id, v4, v6)
             store.record_state(cloud.id, bool(node and node.get("online")), now)
+        found = relay_addresses(nodes)
+        if found != self._relay_addresses and not self.svc.cfg.relay_addresses:
+            if found:
+                log.info("the relay's mesh addresses: %s", ", ".join(found))
+            else:
+                log.warning("no node on the mesh is tagged %s: boxes will not take passed-through visitors", RELAY_TAG)
+        self._relay_addresses = found
         self.write_records()
         return True
 

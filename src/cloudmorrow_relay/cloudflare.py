@@ -2,7 +2,7 @@
 
 The zone has `*.<zone>` pointing at this machine (DNS only, not proxied:
 the relay must see the visitor's TLS as it is). That one record already
-makes every cloud's name (its landing page), the relay host and the login
+makes every cloud's name (the relay, which passes it on to the box), the relay host and the login
 host resolve. What it cannot say, the relay writes, and only that:
 
 - `_acme-challenge.<name>` TXT, the values a box posts to
@@ -13,8 +13,8 @@ host resolve. What it cannot say, the relay writes, and only that:
   explicit record says what the wildcard would have.
 
 A box's mesh address is never published here: devices on the mesh learn
-it from Headscale's extra records (meshwatch.py), and everybody else gets
-the landing page.
+it from Headscale's extra records (meshwatch.py), and everybody else goes
+through the relay.
 
 Every record the relay creates carries the comment `cloudmorrow-relay`
 (`dns.tag`), and the relay only ever changes or deletes records carrying

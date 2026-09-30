@@ -62,7 +62,7 @@ class Route:
 class Acme:
     """Getting the relay's own certificate by itself, with lego: the
     relay host, the login host and, with the DNS challenge, `*.<zone>` for
-    the landing pages. Off when `client` is empty: then the files at
+    the offline pages. Off when `client` is empty: then the files at
     tls.cert/tls.key are somebody else's business, as before.
     """
 
@@ -103,6 +103,13 @@ class Limits:
     peek_timeout: float = 10.0
     peek_max_bytes: int = 16 * 1024
     handshake_timeout: float = 10.0
+    # How long a box has to take the connection when the relay passes a
+    # visitor through, before the visitor gets the offline page instead.
+    box_connect_timeout: float = 3.0
+    # After a box did not answer, the relay does not try it again for this
+    # long: a browser opens several connections at once, and each one
+    # would otherwise wait out the timeout above.
+    box_retry_after: float = 15.0
     max_pending_connections: int = 2048
     body_max_bytes: int = 16 * 1024
 
@@ -170,17 +177,35 @@ class Config:
     admin_secret_file: Path | None = None
     # Where the box sends the person to enter a link code.
     link_url: str = "https://cloudmorrow.com/link"
-    # Where the owner makes an invite without a device on the mesh (My Clouds).
+    # My Clouds, which the offline page points a cloud's owner to.
     clouds_url: str = "https://cloudmorrow.com/clouds"
-    # What the landing page links to: the core's releases, and the client
-    # installer that /install.sh runs.
+    # What the offline page links to: the core's releases. (The box serves
+    # its own /install.sh; the relay no longer does.)
     releases_url: str = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest"
-    installer_url: str = "https://github.com/Cloudmorrow/cloudmorrow/releases/latest/download/install.sh"
     # How often the relay reads the boxes' state from Headscale (the
     # extra records, uptime), in seconds.
     mesh_poll_seconds: float = 60.0
+    # How the relay reaches a box's mesh address to pass a visitor through:
+    # "direct" (the host is on the mesh itself, as tag:relay, with a kernel
+    # tailscaled and host networking) or "socks5://host:port" (a userspace
+    # tailscaled's SOCKS5 proxy).
+    mesh_dial: str = "direct"
+    # The relay node's own mesh addresses. Boxes get them in their record
+    # and accept a PROXY protocol header from these addresses only. Empty:
+    # the addresses of the nodes tagged tag:relay, read from Headscale.
+    relay_addresses: list[str] = field(default_factory=list)
+    # The port a box takes passed-through visitors on (its Caddy's second
+    # site). Only tests change it.
+    box_port: int = 8443
 
     # --- derived -------------------------------------------------------
+
+    @property
+    def mesh_socks5(self) -> tuple[str, int] | None:
+        """The SOCKS5 proxy's address when mesh_dial names one."""
+        if not self.mesh_dial.startswith("socks5://"):
+            return None
+        return _upstream(self.mesh_dial[len("socks5://"):].rstrip("/"), "mesh_dial")
 
     @property
     def db_path(self) -> Path:
@@ -257,10 +282,17 @@ def _ip(value: str | None, version: int, what: str) -> str | None:
     return str(addr)
 
 
-def _upstream(value: str) -> tuple[str, int]:
+def _any_ip(value: str, what: str) -> str:
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError as exc:
+        raise ConfigError(f"{what}: {value!r} is not an IP address") from exc
+
+
+def _upstream(value: str, what: str = "route upstream") -> tuple[str, int]:
     host, sep, port = str(value).rpartition(":")
-    if not sep or not port.isdigit():
-        raise ConfigError(f"route upstream {value!r} is not host:port")
+    if not sep or not port.isdigit() or not host:
+        raise ConfigError(f"{what} {value!r} is not host:port")
     return host.strip("[]"), int(port)
 
 
@@ -353,8 +385,10 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
         link_url=data.get("link_url", Config.link_url),
         clouds_url=data.get("clouds_url", Config.clouds_url),
         releases_url=landing.get("releases_url", Config.releases_url),
-        installer_url=landing.get("installer_url", Config.installer_url),
         mesh_poll_seconds=float(hs.get("poll_seconds", 60.0)),
+        mesh_dial=str(data.get("mesh_dial", "direct")).strip(),
+        relay_addresses=[_any_ip(a, "relay_addresses") for a in data.get("relay_addresses", [])],
+        box_port=int(data.get("box_port", 8443)),
         acme=Acme(
             client=tls.get("acme", ""),
             challenge=tls.get("acme_challenge", "dns-cloudflare"),
@@ -368,6 +402,10 @@ def from_dict(data: dict, base: Path | None = None) -> Config:
     )
     if cfg.dns_backend not in ("builtin", "cloudflare"):
         raise ConfigError('dns.backend is "builtin" or "cloudflare"')
+    if cfg.mesh_dial != "direct":
+        if not cfg.mesh_dial.startswith("socks5://"):
+            raise ConfigError('mesh_dial is "direct" or "socks5://host:port"')
+        cfg.mesh_socks5  # raises on a bad address
     if cfg.acme.client not in ("", "lego"):
         raise ConfigError('tls.acme is "lego" or empty')
     if cfg.acme.challenge not in ("dns-cloudflare", "http"):

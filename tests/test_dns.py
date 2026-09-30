@@ -51,7 +51,7 @@ async def test_never_the_mesh_address(svc, api, enrol):
     await join(svc, api, key["key"])
     await svc.meshwatch.refresh()
     assert svc.store.cloud(cloud["cloud_id"]).mesh_address
-    # Everybody outside the mesh gets the relay (the landing page).
+    # Everybody outside the mesh gets the relay (which passes it through).
     assert answers(await ask(svc, f"larsens.{ZONE}")) == ["203.0.113.7"]
 
 

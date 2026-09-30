@@ -1,4 +1,7 @@
-"""The landing page at <name>.<zone>, as a visitor off the mesh sees it."""
+"""The offline page at <name>.<zone>, as a visitor off the mesh sees it
+when the relay cannot pass them through: here no box ever joins, so every
+linked cloud gets it.
+"""
 
 from __future__ import annotations
 
@@ -32,22 +35,35 @@ async def visitor(svc):
 async def test_the_page(visitor, link_box, svc):
     await link_box("larsens", ACCOUNT)
     resp = await visitor("larsens").get("/")
-    assert resp.status_code == 200
+    assert resp.status_code == 503 and resp.headers["retry-after"] == "60"
     page = resp.text
     assert "<h1>A Cloudmorrow cloud</h1>" in page
     assert f"larsens.{ZONE}" in page
-    assert "This cloud's web app opens on its devices. Ask someone on it for an invite." in page
-    assert 'Yours? Make one in <a href="https://cloudmorrow.com/clouds">My Clouds</a>.' in page
+    assert "This cloud can&#x27;t be reached right now." in page
+    assert 'Yours? <a href="https://cloudmorrow.com/clouds">My Clouds</a> shows how it is doing.' in page
     assert 'href="https://github.com/Cloudmorrow/cloudmorrow/releases/latest"' in page
-    assert f"curl -fsSL https://larsens.{ZONE}:{svc.cfg.https_port}/install.sh | sh" in page or \
-        f"curl -fsSL {svc.cfg.public_url('larsens')}/install.sh | sh" in page
-    # The QR code of the login server, drawn here, no external anything.
-    assert "<svg" in page and svc.cfg.login_server in page
+    # Invites are gone, and so is the login server's QR code; the QR code
+    # is of the cloud's own address, for a phone's browser.
+    for gone in ("invite", "Invite", "Tailscale", svc.cfg.login_server, "install.sh"):
+        assert gone not in page, gone
+    assert "<svg" in page and svc.cfg.public_url("larsens") in page
     assert "http://" not in page.replace("http://www.w3.org/2000/svg", "")
     assert "<script" not in page
     csp = resp.headers["content-security-policy"]
     assert "default-src 'none'" in csp and "script-src" not in csp
     assert resp.headers["x-robots-tag"] == "noindex"
+
+
+async def test_off_the_internet(visitor, link_box, api):
+    """The owner turned "Reachable from anywhere" off (the box tells the
+    relay): the page says where the cloud opens instead.
+    """
+    one = await link_box("larsens", ACCOUNT)
+    await api.patch("/v1/clouds/me", json={"public": False}, headers={"Authorization": f"Bearer {one['token']}"})
+    resp = await visitor("larsens").get("/")
+    assert resp.status_code == 503 and "retry-after" not in resp.headers
+    assert "This cloud opens at home and on its own devices." in resp.text
+    assert "can&#x27;t be reached" not in resp.text
 
 
 async def test_the_fonts_and_hedgehog_are_served_here(visitor, link_box):
@@ -61,10 +77,12 @@ async def test_the_fonts_and_hedgehog_are_served_here(visitor, link_box):
         assert resp.headers["x-content-type-options"] == "nosniff"
     assert (await browser.get("/_cm/barlow-400.woff2")).headers["content-type"] == "font/woff2"
     assert (await browser.get("/_cm/OFL-Barlow.txt")).status_code == 200
-    for bad in ("/_cm/nothing.png", "/_cm/..%2Flanding.py", "/_cm/landing.py", "/_cm/.hidden.png"):
+    for bad in ("/_cm/nothing.png", "/_cm/landing.py", "/_cm/.hidden.png"):
         assert (await browser.get(bad)).status_code == 404, bad
-    # Anything but a page file is still the landing page's 404.
-    assert (await browser.get("/_cm/a/b.png")).status_code == 404
+    # Anything but a page file is the offline page.
+    for bad in ("/_cm/a/b.png", "/_cm/..%2Flanding.py"):
+        resp = await browser.get(bad)
+        assert resp.status_code == 503 and "import" not in resp.text, bad
     assert "font-src 'self'" in (await browser.get("/")).headers["content-security-policy"]
 
 
@@ -98,39 +116,13 @@ async def test_display_name_and_logo_when_turned_on(visitor, link_box, admin, sv
     assert logo.headers["x-content-type-options"] == "nosniff"
 
 
-async def test_install_sh(visitor, link_box, svc):
+async def test_install_sh_is_the_boxs(visitor, link_box):
+    """The box serves /install.sh; the relay answers the page with 503, so
+    `curl -fsSL …/install.sh | sh` stops rather than running HTML.
+    """
     await link_box("larsens", ACCOUNT)
     resp = await visitor("larsens").get("/install.sh")
-    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/plain")
-    script = resp.text
-    assert script.startswith("#!/bin/sh\n")
-    assert "https://github.com/Cloudmorrow/cloudmorrow/releases/latest/download/install.sh" in script
-    assert f"--server '{svc.cfg.public_url('larsens')}' --invite" in script
-    assert len(script.splitlines()) < 15
-
-
-async def test_install_sh_runs_the_installer(visitor, link_box, svc, tmp_path):
-    """The script as sh runs it, with curl standing in: it fetches the
-    installer and hands it the server and the invite.
-    """
-    import os
-    import subprocess
-
-    await link_box("larsens", ACCOUNT)
-    script = (await visitor("larsens").get("/install.sh")).text
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "curl").write_text(
-        '#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\n'
-        'printf \'echo "installer: $*"\\n\' > "$2"\n'
-    )
-    (bin_dir / "curl").chmod(0o755)
-    out = subprocess.run(
-        ["sh", "-s", "--", "ABC234"], input=script, capture_output=True, text=True,
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}, timeout=10,
-    )
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == f"installer: --server {svc.cfg.public_url('larsens')} --invite ABC234"
+    assert resp.status_code == 503 and resp.headers["content-type"].startswith("text/html")
 
 
 async def test_no_cloud_here(visitor, svc):
@@ -138,12 +130,13 @@ async def test_no_cloud_here(visitor, svc):
     assert resp.status_code == 404
     assert "There is no cloud here." in resp.text
     assert (await visitor("nobody").get("/install.sh")).status_code == 404
+    assert (await visitor("nobody").get("/logo")).status_code == 404
 
 
-async def test_deep_links_get_the_page_and_nothing_reaches_a_box(visitor, link_box):
+async def test_deep_links_get_the_page(visitor, link_box):
     await link_box("larsens", ACCOUNT)
     resp = await visitor("larsens").get("/files/some-note")
-    assert resp.status_code == 404 and "Ask someone on it for an invite." in resp.text
+    assert resp.status_code == 503 and "This cloud can&#x27;t be reached right now." in resp.text
     assert (await visitor("larsens").post("/api/login", json={})).status_code == 405
 
 
@@ -151,7 +144,7 @@ async def test_the_sni_decides_not_the_host_header(link_box, svc):
     await link_box("larsens", ACCOUNT)
     async with loopback_client(svc.ca.path, f"https://larsens.{ZONE}:{svc.https_port}") as client:
         resp = await client.get("/", headers={"Host": f"nobody.{ZONE}"})
-        assert resp.status_code == 200 and "Ask someone on it" in resp.text
+        assert resp.status_code == 503 and "reached right now" in resp.text
 
 
 async def test_port_80_redirects(link_box, svc):

@@ -2,7 +2,8 @@
 
 A cloud is a row: its id, its name, the account that owns it (an opaque
 string from the website), the hash of its token, its box's mesh addresses,
-and what the owner chose to show on the landing page. Around it: the
+whether visitors from anywhere are passed through to it (`public`, which
+the box sets), and what the owner chose to show on the offline page. Around it: the
 acme-dns credentials and TXT values for its `_acme-challenge` record,
 invite codes, link codes waiting for the website, its logo, and the times
 its box went online or offline.
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS clouds (
     display_name   TEXT,
     show_name      INTEGER NOT NULL DEFAULT 0,
     show_logo      INTEGER NOT NULL DEFAULT 0,
+    public         INTEGER NOT NULL DEFAULT 1,
     created_at     REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS clouds_account ON clouds(account);
@@ -88,16 +90,18 @@ CREATE TABLE IF NOT EXISTS uptime (
 CREATE INDEX IF NOT EXISTS uptime_cloud ON uptime(cloud_id, at);
 """
 
-# What an older database has that this one does not want: the public
-# tunnel's switch and byte counts, device labels, pairing codes (now
-# invites; any left expire within ten minutes anyway).
+# What an older database lacks, and what it has that this one does not
+# want: the public tunnel's byte counts, device labels, pairing codes (now
+# invites; any left expire within ten minutes anyway). `public` came back
+# with pass-through: a database from the tunnel's days keeps its column
+# (the same switch), one from after it gets it, on for every cloud.
 MIGRATIONS = [
     "ALTER TABLE clouds ADD COLUMN account TEXT",
     "ALTER TABLE clouds ADD COLUMN mesh_address6 TEXT",
     "ALTER TABLE clouds ADD COLUMN display_name TEXT",
     "ALTER TABLE clouds ADD COLUMN show_name INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE clouds ADD COLUMN show_logo INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE clouds DROP COLUMN public",
+    "ALTER TABLE clouds ADD COLUMN public INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE clouds DROP COLUMN bytes_in",
     "ALTER TABLE clouds DROP COLUMN bytes_out",
     "DROP TABLE IF EXISTS labels",
@@ -143,6 +147,7 @@ class Cloud:
     display_name: str | None
     show_name: bool
     show_logo: bool
+    public: bool
     created_at: float
 
     @property
@@ -220,6 +225,7 @@ class Store:
         values = {k: row[k] for k in CLOUD_FIELDS}
         values["show_name"] = bool(values["show_name"])
         values["show_logo"] = bool(values["show_logo"])
+        values["public"] = bool(values["public"])
         return Cloud(**values)
 
     def code_hash(self, code: str) -> str:
@@ -288,13 +294,17 @@ class Store:
         )
 
     def set_landing(self, cloud_id: str, **values) -> None:
-        """The landing page's switches: display_name, show_name, show_logo."""
+        """The offline page's switches: display_name, show_name, show_logo."""
         for key, value in values.items():
             if key not in ("display_name", "show_name", "show_logo"):
                 raise ValueError(key)
             if key != "display_name":
                 value = int(bool(value))
             self._exec(f"UPDATE clouds SET {key} = ? WHERE id = ?", value, cloud_id)
+
+    def set_public(self, cloud_id: str, public: bool) -> None:
+        """Whether the relay passes visitors from anywhere through to the box."""
+        self._exec("UPDATE clouds SET public = ? WHERE id = ?", int(bool(public)), cloud_id)
 
     def delete_cloud(self, cloud_id: str) -> None:
         self._exec("DELETE FROM clouds WHERE id = ?", cloud_id)

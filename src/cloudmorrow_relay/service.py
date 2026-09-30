@@ -1,6 +1,6 @@
 """All the parts, started together in one process.
 
-The relay (443 and 80), the control API and the landing page (behind it,
+The relay (443 and 80), the control API and the offline page (behind it,
 on loopback), the DNS server (53, UDP and TCP), and the watch on the boxes
 through Headscale share one database and one event loop. One process is
 the whole service: a small VPS runs it, a restart restarts all of it, and
@@ -171,7 +171,7 @@ class Service:
     async def start(self) -> None:
         cfg = self.cfg
         # One uvicorn on two loopback ports: the control API and the
-        # landing page, told apart by the port a request came in on.
+        # offline page, told apart by the port a request came in on.
         for _ in range(2):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -204,6 +204,12 @@ class Service:
             log.warning(
                 "Headscale's policy does not limit devices to their own user "
                 "(no autogroup:self): clouds' devices could reach each other. "
+                "Use deploy/headscale/policy.hujson."
+            )
+        if "tag:relay" not in policy:
+            log.warning(
+                "Headscale's policy has no rule for tag:relay: the relay cannot pass "
+                "visitors through to boxes, and everybody gets the offline page. "
                 "Use deploy/headscale/policy.hujson."
             )
 

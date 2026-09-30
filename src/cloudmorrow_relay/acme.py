@@ -16,11 +16,11 @@ backend, handed to lego as CLOUDFLARE_DNS_API_TOKEN), or HTTP-01 through
 the ACME webroot that port 80 serves for the relay's own names.
 
 With DNS-01 the certificate is the wildcard `*.<zone>`: it covers the
-landing pages at `<name>.<zone>` and, being one label deep, the relay host
+offline pages at `<name>.<zone>` and, being one label deep, the relay host
 and the login host as well (Let's Encrypt refuses names a wildcard in the
 same order already covers, so they are listed only when they are deeper).
-HTTP-01 cannot get a wildcard: the relay and login hosts work, the landing
-pages do not. `--force-cert-domains` makes lego start again when the list
+HTTP-01 cannot get a wildcard: the relay and login hosts work, the offline
+pages do not (passing visitors through to boxes needs no certificate here). `--force-cert-domains` makes lego start again when the list
 of names changed, as it does for a relay that had no wildcard before.
 """
 

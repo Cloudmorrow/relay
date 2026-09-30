@@ -11,17 +11,29 @@ On 443 we read the ClientHello's server name and nothing more, then:
                                  pages
     a name in [[routes]] sni   → passed through to that upstream (the
                                  website, the shop on the same machine)
-    <name>.<zone>              → TLS terminated here with the wildcard
-                                 certificate; the landing page. Nothing
-                                 ever goes on to a box.
+    <name>.<zone> of a linked  → passed through, unread, over the mesh to
+      cloud that is public       port 8443 of the cloud's box, after a
+                                 PROXY protocol v2 header with the
+                                 visitor's address (meshdial.py)
+    <name>.<zone> otherwise    → TLS terminated here with the wildcard
+                                 certificate; the offline page (or "There
+                                 is no cloud here.")
     anything else              → closed
+
+A cloud's name gets the offline page when the box has no mesh address,
+does not take the connection within three seconds, or its owner turned
+"Reachable from anywhere" off. The choice is made before a single byte is
+answered, and a connection the relay ended TLS on is never forwarded to a
+box: from there on it only ever reaches the offline page. The wildcard
+certificate would let the relay do otherwise; this is the code that
+doesn't.
 
 On 80 the same, by the `Host` header, with no TLS anywhere: the relay's
 own names go to the control app (its certificate's challenge, and a
 redirect), a route's names to their upstream, and `<name>.<zone>` gets a
 redirect to https, written here.
 
-The control API and the landing page run in the same process, on two
+The control API and the offline page run in the same process, on two
 loopback ports of one uvicorn, and the relay hands them the decrypted
 connection. That keeps them ordinary ASGI apps — testable on their own —
 at the price of one local hop. The visitor's real address (and the name
@@ -38,7 +50,7 @@ import logging
 import ssl
 from pathlib import Path
 
-from . import sni
+from . import meshdial, sni
 from .conn import Conn, PlainConn, TLSConn, splice
 
 log = logging.getLogger("cloudmorrow_relay.router")
@@ -119,12 +131,14 @@ class Router:
         self._tasks: set[asyncio.Task] = set()
         self.sni_routes = {name: r for r in self.cfg.routes for name in r.sni}
         self.host_routes = {name: r for r in self.cfg.routes for name in r.host}
+        # cloud id → until when its box is not tried again (it did not answer)
+        self._unreachable: dict[str, float] = {}
 
     # --- helpers -------------------------------------------------------------
 
     async def _forward(self, conn: Conn, host: str, port: int, prefix: bytes, remote: str, plain: bool, name: str) -> None:
         """Hand a connection to a local HTTP upstream (the control app, the
-        landing page or Headscale), starting with the bytes already read.
+        offline page or Headscale), starting with the bytes already read.
         """
         try:
             reader, writer = await asyncio.open_connection(host, port)
@@ -188,12 +202,45 @@ class Router:
             if name in self.sni_routes:
                 await self._passthrough(conn, self.sni_routes[name], hello)
                 return
-            if name in (self.cfg.relay_host, self.cfg.login_host) or self.cfg.cloud_label(name):
+            label = self.cfg.cloud_label(name)
+            if label and await self._to_box(conn, label, hello):
+                return
+            if name in (self.cfg.relay_host, self.cfg.login_host) or label:
                 await self._own_tls(conn, name, hello, remote)
                 return
             await conn.close()
         except (ConnectionError, OSError, ssl.SSLError, TimeoutError):
             await conn.close()
+
+    async def _to_box(self, conn: PlainConn, label: str, hello: bytes) -> bool:
+        """Pass a visitor to a cloud's box, unread. False, with nothing
+        sent either way, when the name is no cloud's, the cloud is not
+        public, or its box cannot be reached: then the offline page.
+        """
+        cloud = self.svc.store.cloud_by_name(label)
+        if cloud is None or not cloud.public:
+            return False
+        address = cloud.mesh_address or cloud.mesh_address6
+        loop = asyncio.get_running_loop()
+        if address is None or self._unreachable.get(cloud.id, 0) > loop.time():
+            return False
+        try:
+            box = await meshdial.dial(self.cfg, address)
+        except (OSError, TimeoutError, ValueError) as exc:
+            # The name, never the visitor.
+            log.debug("the box of %s did not answer: %s", label, exc or type(exc).__name__)
+            self._unreachable[cloud.id] = loop.time() + self.limits.box_retry_after
+            return False
+        self._unreachable.pop(cloud.id, None)
+        src = conn.writer.get_extra_info("peername")
+        dst = conn.writer.get_extra_info("sockname")
+        try:
+            await box.write(meshdial.proxy_v2_header(src, dst) + hello)
+        except (ConnectionError, OSError):
+            await box.close()
+            raise
+        await splice(conn, box)
+        return True
 
     async def _own_tls(self, conn: PlainConn, name: str, hello: bytes, remote: str) -> None:
         ctx = self.svc.certs.context

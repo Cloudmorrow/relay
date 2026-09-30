@@ -1,7 +1,7 @@
 """The relay, for real, on loopback.
 
 Every test that needs it gets a whole Service (relay, control API, admin
-API, landing pages, DNS) on ports the kernel picks, with a throwaway CA
+API, offline pages, DNS) on ports the kernel picks, with a throwaway CA
 and a fake Headscale on its own port.
 
 Names are under `cm.test`. Nothing resolves them; clients connect to
@@ -137,6 +137,7 @@ async def svc(tmp_path, ca, fake_hs, limits, extra_config, monkeypatch):
                 {"name": "@", "type": "MX", "value": f"10 mail.{ZONE}."},
             ],
         },
+        "relay_addresses": ["100.64.0.100", "fd7a:115c:a1e0::64"],
         "limits": limits,
     }, extra_config))
     service = Service(cfg)
@@ -193,9 +194,10 @@ async def link_box(api, admin):
     return link
 
 
-async def join(svc, api, key: str, hostname: str = "cloud") -> dict:
+async def join(svc, api, key: str, hostname: str = "cloud", tags: list[str] | None = None) -> dict:
     """A device joining the fake Headscale with a key, as `tailscale up` would."""
-    resp = await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/join", json={"key": key, "hostname": hostname})
+    body = {"key": key, "hostname": hostname, "tags": tags or []}
+    resp = await api.post(f"http://127.0.0.1:{svc.fake.port}/fake/join", json=body)
     assert resp.status_code == 200, resp.text
     return resp.json()["node"]
 

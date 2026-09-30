@@ -1,4 +1,4 @@
-"""Checking a logo before the landing page shows it.
+"""Checking a logo before the offline page shows it.
 
 PNG, JPEG or SVG, at most 256 KiB, and the bytes must be what the content
 type says. PNG and JPEG are taken on their signature: the page shows them
@@ -9,7 +9,7 @@ plainly a picture: well-formed XML with an `<svg>` root, no DOCTYPE or
 entities, no `<script>`, `<foreignObject>` or event handlers, and no links
 anywhere but inside itself (`#id`) or to an embedded PNG/JPEG. It is
 refused rather than cleaned: the owner sees why and can export it again.
-The landing page serves it with a policy that forbids everything besides
+The offline page serves it with a policy that forbids everything besides
 (landing.py), so a mistake here is still not a hole.
 """
 

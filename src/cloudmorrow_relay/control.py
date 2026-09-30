@@ -6,6 +6,10 @@ code, and the box collects the token once. After that every call is
 answers are JSON; errors are `{"detail": "<a plain sentence>"}` — the core
 shows them to people, so they read as sentences, not codes.
 
+Invites (`…/mesh/invites`, `/v1/invites/redeem`) are retired: a phone
+uses the web app from anywhere now, and a native client joins the mesh
+through its cloud. They keep working for clients older than that.
+
 Status codes, where the contract leaves them open: a create answers 201
 (`/v1/links`, `…/mesh/keys`, `…/mesh/invites`, `/v1/invites/redeem`,
 `/v1/acme-dns/register`, as acme-dns itself does), a delete 204 with no
@@ -17,7 +21,7 @@ reached, 502 when Headscale did not answer, 503 when the mesh is not
 configured on this relay at all.
 
 The same app serves the admin API for the website (admin.py), the pairing
-pages for the login host (pairing.py) and, on port 80, the files lego or
+pages for the login host (pairing.py, retired with the invites) and, on port 80, the files lego or
 certbot put in the ACME webroot for the relay's own certificate.
 """
 
@@ -66,6 +70,10 @@ class KeyBody(Strict):
 class RedeemBody(Strict):
     name: str = Field(max_length=200)
     code: str = Field(max_length=32)
+
+
+class PublicBody(Strict):
+    public: bool
 
 
 class AddressBody(Strict):
@@ -220,15 +228,32 @@ def create_app(svc) -> FastAPI:
         await svc.dns_changed([name])
         return links.handover(svc, cloud)
 
-    @app.get("/v1/clouds/me")
-    async def me(cloud: Cloud = Depends(cloud_for)):
+    def record(cloud: Cloud) -> dict:
         return {
             "cloud_id": cloud.id,
             "name": cloud.name,
             "zone": cfg.zone,
             "mesh_address": cloud.mesh_address,
             "login_server": cfg.login_server,
+            # Whether the relay passes visitors from anywhere through to
+            # the box, and the addresses they come from: the only ones the
+            # box takes a PROXY protocol header from.
+            "public": cloud.public,
+            "relay_addresses": svc.meshwatch.relay_addresses,
         }
+
+    @app.get("/v1/clouds/me")
+    async def me(cloud: Cloud = Depends(cloud_for)):
+        return record(cloud)
+
+    @app.patch("/v1/clouds/me")
+    async def set_public(body: PublicBody, cloud: Cloud = Depends(cloud_for)):
+        # "Reachable from anywhere", as the owner set it on the box. The
+        # name is not the box's to change: renaming is the website's.
+        if body.public != cloud.public:
+            store.set_public(cloud.id, body.public)
+            log.info("cloud %s is %s from anywhere", cloud.id, "reachable" if body.public else "not reachable")
+        return record(store.cloud(cloud.id))
 
     @app.delete("/v1/clouds/me", status_code=204)
     async def delete(cloud: Cloud = Depends(cloud_for)):

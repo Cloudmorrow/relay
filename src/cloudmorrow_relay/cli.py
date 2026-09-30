@@ -108,7 +108,7 @@ Cloudmorrow relay {__version__}, dev mode — everything on this machine, nothin
 
   control server   {control}
   admin API        {control}/admin/v1   (Authorization: Bearer {admin_secret})
-  landing pages    https://<name>.{DEV_ZONE}:{https}   (http on :{http} redirects there)
+  offline pages    https://<name>.{DEV_ZONE}:{https}   (http on :{http} redirects there)
   login server     https://{login_host}:{https}   (a fake Headscale behind it, on :{hs_port})
   DNS              dig @127.0.0.1 -p {dns} <name>.{DEV_ZONE}
   state            {folder}

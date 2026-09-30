@@ -1,20 +1,24 @@
-"""The landing page at `<name>.<zone>`, for anybody not on the cloud's mesh.
+"""The offline page at `<name>.<zone>`, when the relay cannot pass a
+visitor through to the cloud's box.
 
-Everywhere outside the mesh a cloud's name resolves to the relay (the
-Cloudflare wildcard, or our own DNS server), and the relay answers with its
-wildcard certificate for `*.<zone>`. Nothing is forwarded to the box: a
-cloud's web app opens only on its devices. What a visitor gets instead is
-one page:
+Everywhere outside the mesh a cloud's name resolves to the relay, which
+passes the visitor's TLS through to the box unread (router.py). When it
+cannot — the box has no mesh address or does not answer, or its owner
+turned "Reachable from anywhere" off — the relay ends TLS itself with its
+wildcard certificate for `*.<zone>` and answers with this page, and
+nothing else. What a visitor gets:
 
 - the display name and logo, if the owner turned them on; otherwise "A
   Cloudmorrow cloud";
-- the client downloads, linked to the core's GitHub Releases, and
-  `/install.sh`, a few lines of sh that fetch the released client installer
-  and run it for this cloud (`--server https://<name>.<zone> --invite`);
-- a QR code of the login server, for a phone's Tailscale app;
-- one line saying the web app opens on the cloud's devices.
+- "This cloud can't be reached right now", or, when the owner took it off
+  the internet, "This cloud opens at home and on its own devices";
+- the client downloads, linked to the core's GitHub Releases, so they
+  cost the relay nothing.
 
-A name nobody has linked answers "There is no cloud here."
+Every path answers 503 with the page (a link into the cloud's web app,
+opened while the box is away, lands here and learns why), so `curl -f
+…/install.sh | sh` fails rather than feeding a web page to sh. A name
+nobody has linked answers "There is no cloud here." (404).
 
 The page looks like cloudmorrow.com and is plain HTML with no script, no
 external assets (its fonts and hedgehog are served from `/_cm/`) and a
@@ -32,7 +36,7 @@ from pathlib import Path
 
 import segno
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, Response
 
 PAGE_HEADERS = {
     "Content-Security-Policy": (
@@ -195,20 +199,27 @@ MORROW = (
 )
 
 
-def landing_html(cfg, cloud, has_logo: bool) -> str:
+def offline_html(cfg, cloud, has_logo: bool) -> str:
     host = cfg.public_host(cloud.name)
     url = cfg.public_url(cloud.name)
     named = bool(cloud.show_name and cloud.display_name)
     title = cloud.display_name if named else "A Cloudmorrow cloud"
     mark = '<img src="/logo" alt="">' if (cloud.show_logo and has_logo) else MORROW
     e = html.escape
+    if cloud.public:
+        lead = "This cloud can't be reached right now."
+        fine = "Its box may be switched off, or away from the internet. Try again in a little while."
+    else:
+        lead = "This cloud opens at home and on its own devices."
+        fine = "Its owner keeps it off the internet. On its home network, or in the Cloudmorrow app, it opens as usual."
     hero = f"""
 <div>
  {'<p class="label">A Cloudmorrow cloud</p>' if named else ''}
  <h1>{e(title)}</h1>
  <p class="host">{e(host)}</p>
- <p class="lead">This cloud's web app opens on its devices. Ask someone on it for an invite.</p>
- <p class="fine">Yours? Make one in <a href="{e(cfg.clouds_url)}">My Clouds</a>.</p>
+ <p class="lead">{e(lead)}</p>
+ <p class="fine">{e(fine)}</p>
+ <p class="fine">Yours? <a href="{e(cfg.clouds_url)}">My Clouds</a> shows how it is doing.</p>
 </div>
 <figure>{mark}</figure>
 """
@@ -216,19 +227,16 @@ def landing_html(cfg, cloud, has_logo: bool) -> str:
 <main class="wrap ways">
 <section class="card">
  <h2>{px("screens")}On a computer</h2>
- <p class="muted">Get the Cloudmorrow client, then use your invite to join.</p>
- <a class="btn" href="{e(cfg.releases_url)}">Download the client</a>
- <p class="muted">Or in a terminal (macOS, Linux):</p>
- <div class="cmd"><span class="p">$ </span>curl -fsSL {e(url)}/install.sh | sh</div>
+ <p class="muted">The desktop app and the terminal clients. Once you have signed in, they go straight to this cloud's box, wherever you are.</p>
+ <a class="btn" href="{e(cfg.releases_url)}">Download the app</a>
 </section>
 <section class="card">
  <h2>{px("phone")}On a phone</h2>
  <div class="phone">
-  <div class="qr">{qr_svg(cfg.login_server)}</div>
+  <div class="qr">{qr_svg(url)}</div>
   <div>
-   <p class="muted">Install the Tailscale app, choose a custom login server, and scan this or type</p>
-   <b>{e(cfg.login_server)}</b>
-   <p class="muted">The app then opens a page that asks for your invite.</p>
+   <p class="muted">Open this address in the phone's browser, and add it to the home screen:</p>
+   <b>{e(url)}</b>
   </div>
  </div>
 </section>
@@ -249,36 +257,14 @@ def nobody_html() -> str:
     return _document("There is no cloud here.", hero)
 
 
-def install_sh(cfg, cloud) -> str:
-    url = cfg.public_url(cloud.name)
-    return f"""#!/bin/sh
-# Installs the Cloudmorrow client for {cfg.public_host(cloud.name)} and joins it
-# with an invite. The installer itself comes from the Cloudmorrow releases:
-#   {cfg.installer_url}
-# Pass the invite as `sh -s -- <code>`, or type it when asked.
-set -eu
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL '{cfg.installer_url}' -o "$tmp"
-sh "$tmp" --server '{url}' --invite "$@"
-"""
-
-
 def create_app(svc) -> FastAPI:
     cfg = svc.cfg
     store = svc.store
-    app = FastAPI(title="Cloudmorrow landing", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Cloudmorrow offline page", docs_url=None, redoc_url=None, openapi_url=None)
 
     def cloud_for(request: Request):
         label = cfg.cloud_label(svc.entry_name(request))
         return store.cloud_by_name(label) if label else None
-
-    @app.get("/install.sh", include_in_schema=False)
-    async def installer(request: Request):
-        cloud = cloud_for(request)
-        if cloud is None:
-            return PlainTextResponse("There is no cloud here.\n", 404, headers=PAGE_HEADERS)
-        return PlainTextResponse(install_sh(cfg, cloud), headers=PAGE_HEADERS)
 
     @app.get(ASSET_PREFIX + "{name}", include_in_schema=False)
     async def page_asset(name: str):
@@ -301,9 +287,8 @@ def create_app(svc) -> FastAPI:
         cloud = cloud_for(request)
         if cloud is None:
             return HTMLResponse(nobody_html(), 404, headers=PAGE_HEADERS)
-        # Any path gets the page: a link into the cloud's web app, opened
-        # off the mesh, lands here and learns why. Only "/" is a 200.
-        status = 200 if path == "" else 404
-        return HTMLResponse(landing_html(cfg, cloud, store.has_logo(cloud.id)), status, headers=PAGE_HEADERS)
+        # The cloud is there but not here: every path, "/" too.
+        headers = PAGE_HEADERS | ({"Retry-After": "60"} if cloud.public else {})
+        return HTMLResponse(offline_html(cfg, cloud, store.has_logo(cloud.id)), 503, headers=headers)
 
     return app

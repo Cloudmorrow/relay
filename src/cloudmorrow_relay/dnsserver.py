@@ -11,7 +11,7 @@ What it answers:
     <zone>, and names from [[dns.records]]    the operator's static records
     relay host, login host, nameservers     the relay's public addresses
     <name>.<zone>                            the relay's public addresses
-                                             (the landing page; devices on
+                                             (the relay, which passes it through; devices on
                                              the mesh ask Headscale instead)
     _acme-challenge.<name>.<zone> TXT        the cloud's latest two values
 

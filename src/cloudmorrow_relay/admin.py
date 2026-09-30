@@ -13,22 +13,21 @@ that account's is answered like one that does not exist.
     POST   /admin/v1/links/{code}/approve       make the cloud, for the box
     POST   /admin/v1/links/{code}/refuse        the person said no
     GET    /admin/v1/accounts/{account}/clouds  the account's clouds
-    PATCH  /admin/v1/clouds/{id}                rename; the landing page
+    PATCH  /admin/v1/clouds/{id}                rename; the offline page
     GET    /admin/v1/clouds/{id}/logo           the logo, shown or not
     PUT    /admin/v1/clouds/{id}/logo           the logo (the body)
     DELETE /admin/v1/clouds/{id}/logo
-    POST   /admin/v1/clouds/{id}/invites        an invite code, for the owner
+    POST   /admin/v1/clouds/{id}/invites        an invite code (retired)
     DELETE /admin/v1/clouds/{id}                unlink
 
 What the website learns about a cloud is its name, when it was made,
 whether its box is online and how much of the last thirty days it was,
-and what the owner chose for the landing page. Nothing about its devices
-or its people.
+whether it is reachable from anywhere (the box decides that; the website
+only shows it), and what the owner chose for the offline page. Nothing
+about its devices or its people.
 
-An invite made here is the same as one the box makes (Me → Invite a
-device): it puts a device on the mesh, and the device still signs in to
-the cloud itself. It is how an owner away from home gets the first device
-on, with nothing yet on the mesh to make one from.
+Invites are retired: nothing shows a code any more. The call stays, for
+now, and makes the same invite a box would.
 """
 
 from __future__ import annotations
@@ -107,6 +106,7 @@ def router(svc) -> APIRouter:
             "name": cloud.name,
             "created": iso(cloud.created_at),
             **meshwatch.status(store, cloud),
+            "public": cloud.public,
             "show_name": cloud.show_name,
             "show_logo": cloud.show_logo,
             "display_name": cloud.display_name,
@@ -211,7 +211,7 @@ def router(svc) -> APIRouter:
 
     @r.get("/clouds/{cloud_id}/logo")
     async def get_logo(cloud_id: str, account: str = Query(max_length=ACCOUNT_MAX)):
-        # For My Clouds' preview, whether or not the landing page shows it.
+        # For My Clouds' preview, whether or not the offline page shows it.
         found = store.logo(owned(cloud_id, account).id)
         if found is None:
             raise HTTPException(404, "This cloud has no logo.")

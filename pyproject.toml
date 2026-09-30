@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cloudmorrow-relay"
 version = "0.1.0"
-description = "The relay, control server, landing pages and DNS that let people reach their Cloudmorrow cloud"
+description = "The relay, control server, offline pages and DNS that let people reach their Cloudmorrow cloud"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"

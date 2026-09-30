@@ -4,8 +4,9 @@ It answers the handful of REST calls the relay makes (users, pre-auth
 keys, nodes, registration, policy) the way Headscale 0.29 does, keeps
 everything in memory, and has two extra doors a real one does not:
 `POST /fake/join` (a device joining with a pre-auth key, which in real
-life `tailscale up` does) and `POST /fake/pending` (a phone that opened
-the register URL and is waiting). Nothing about WireGuard is faked; the
+life `tailscale up` does; with `tags`, a tagged node such as the relay's)
+and `POST /fake/pending` (a phone that opened the register URL and is
+waiting). Nothing about WireGuard is faked; the
 point is the relay's side of the conversation.
 """
 
@@ -18,7 +19,11 @@ import secrets
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-POLICY = '{"acls": [{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"]}]}'
+POLICY = (
+    '{"tagOwners": {"tag:relay": []}, "acls": ['
+    '{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"]}, '
+    '{"action": "accept", "src": ["tag:relay"], "dst": ["autogroup:member:8443"]}]}'
+)
 
 
 def _now() -> str:
@@ -40,7 +45,7 @@ class FakeHeadscale:
     def user_by_name(self, name: str) -> dict | None:
         return next((u for u in self.users.values() if u["name"] == name), None)
 
-    def _node(self, user: dict, hostname: str, key: dict | None) -> dict:
+    def _node(self, user: dict, hostname: str, key: dict | None, tags: tuple = ()) -> dict:
         n = next(self._ips)
         node = {
             "id": str(next(self._ids)),
@@ -52,6 +57,7 @@ class FakeHeadscale:
             "lastSeen": _now(),
             "createdAt": _now(),
             "preAuthKey": key,
+            "tags": list(tags),
         }
         self.nodes[node["id"]] = node
         return node
@@ -164,7 +170,10 @@ class FakeHeadscale:
             if key is None or key["used"]:
                 raise HTTPException(400, "bad key")
             key["used"] = True
-            return {"node": fake._node(key["user"], body.get("hostname", "cloud"), key)}
+            # A tagged node (the relay's own, tag:relay) belongs to no user.
+            tags = tuple(body.get("tags") or ())
+            user = {"id": "0", "name": "tagged-devices"} if tags else key["user"]
+            return {"node": fake._node(user, body.get("hostname", "cloud"), key, tags)}
 
         @app.post("/fake/pending")
         async def pending():

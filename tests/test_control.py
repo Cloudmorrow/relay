@@ -111,6 +111,7 @@ async def test_record(api, enrol, svc):
     assert resp.json() == {
         "cloud_id": cloud["cloud_id"], "name": "larsens", "zone": ZONE,
         "mesh_address": None, "login_server": svc.cfg.login_server,
+        "public": True, "relay_addresses": ["100.64.0.100", "fd7a:115c:a1e0::64"],
     }
 
 
@@ -125,8 +126,25 @@ async def test_record_has_the_boxs_mesh_address(api, enrol, svc):
 
 async def test_renaming_is_not_the_boxs(api, enrol):
     cloud = await enrol()
-    resp = await api.patch("/v1/clouds/me", json={"name": "jensens"}, headers=auth(cloud["token"]))
-    assert resp.status_code == 405
+    h = auth(cloud["token"])
+    resp = await api.patch("/v1/clouds/me", json={"name": "jensens"}, headers=h)
+    assert resp.status_code == 422 and resp.json() == {"detail": "public: Field required."}
+    resp = await api.patch("/v1/clouds/me", json={"name": "jensens", "public": True}, headers=h)
+    assert resp.status_code == 200 and resp.json()["name"] == "larsens"
+
+
+async def test_reachable_from_anywhere_or_not(api, enrol, svc):
+    cloud = await enrol()
+    h = auth(cloud["token"])
+    resp = await api.patch("/v1/clouds/me", json={"public": False}, headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["public"] is False and resp.json()["cloud_id"] == cloud["cloud_id"]
+    assert (await api.get("/v1/clouds/me", headers=h)).json()["public"] is False
+    assert svc.store.cloud(cloud["cloud_id"]).public is False
+    assert (await api.patch("/v1/clouds/me", json={"public": True}, headers=h)).json()["public"] is True
+    for body in ({}, {"public": "perhaps"}, {"public": None}):
+        assert (await api.patch("/v1/clouds/me", json=body, headers=h)).status_code == 422, body
+    assert (await api.patch("/v1/clouds/me", json={"public": False})).status_code == 401
 
 
 async def test_give_the_name_back(api, enrol, svc):
@@ -399,3 +417,29 @@ async def test_a_headscale_failure_is_logged_with_its_reason(api, enrol, svc, ca
     assert resp.status_code == 502 and "did not answer" in resp.json()["detail"]
     record = next(r for r in caplog.records if "Headscale failed while mesh key" in r.getMessage())
     assert "status 401" in record.getMessage()
+
+
+class TestRelayAddressesFromHeadscale:
+    """With no relay_addresses in the config, the relay's own addresses
+    are those of the nodes tagged tag:relay, as Headscale says.
+    """
+
+    @pytest.fixture
+    def extra_config(self):
+        return {"relay_addresses": []}
+
+    async def test_the_tagged_nodes_addresses(self, api, enrol, svc):
+        cloud = await enrol()
+        h = auth(cloud["token"])
+        await svc.meshwatch.refresh()
+        assert (await api.get("/v1/clouds/me", headers=h)).json()["relay_addresses"] == []
+        # The operator's tagged key; the node belongs to no cloud.
+        fake, hs_auth = f"http://127.0.0.1:{svc.fake.port}/api/v1", {"Authorization": f"Bearer {svc.fake.api_key}"}
+        user = (await api.post(f"{fake}/user", json={"name": "ops"}, headers=hs_auth)).json()["user"]
+        key = (await api.post(f"{fake}/preauthkey", json={"user": user["id"]}, headers=hs_auth)).json()["preAuthKey"]
+        relay = await join(svc, api, key["key"], hostname="relay", tags=["tag:relay"])
+        await svc.meshwatch.refresh()
+        record = (await api.get("/v1/clouds/me", headers=h)).json()
+        assert record["relay_addresses"] == relay["ipAddresses"]
+        # And it is not taken for the cloud's box.
+        assert record["mesh_address"] is None
